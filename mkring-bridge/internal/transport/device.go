@@ -1,0 +1,609 @@
+package transport
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"runtime"
+	"syscall"
+	"time"
+	"unsafe"
+
+	"mkring-bridge/internal/protocol"
+)
+
+const (
+	mkringContainerMagic   = 0x4d4b434e
+	mkringContainerVersion = 1
+	mkringContainerChannel = 1
+
+	mkringContainerKindRequest  = 2
+	mkringContainerKindResponse = 3
+
+	mkringContainerOpNone    = 0
+	mkringContainerOpCreate  = 1
+	mkringContainerOpStart   = 2
+	mkringContainerOpStop    = 3
+	mkringContainerOpRemove  = 4
+	mkringContainerOpStatus  = 5
+	mkringContainerOpReadLog = 6
+
+	mkringContainerMaxRuntimeName = 16
+	mkringContainerMaxKernelID    = 64
+	mkringContainerMaxPodID       = 64
+	mkringContainerMaxName        = 64
+	mkringContainerMaxImage       = 256
+	mkringContainerMaxLogPath     = 256
+	mkringContainerMaxContainerID = 64
+	mkringContainerMaxImageRef    = 256
+	mkringContainerMaxErrorMsg    = 128
+	mkringContainerMaxLogChunk    = 384
+
+	containerHeaderSize          = 28
+	containerPayloadSize         = 704
+	containerMessageSize         = 732
+	containerWaitReadySize       = 12
+	containerCallSize            = 1476
+	containerCreateRequestSize   = 704
+	containerControlRequestSize  = 136
+	containerReadLogRequestSize  = 140
+	containerCreateResponseSize  = 320
+	containerStopResponseSize    = 4
+	containerStatusResponseSize  = 156
+	containerReadLogResponseSize = 400
+	containerErrorPayloadSize    = 132
+
+	iocNRBits   = 8
+	iocTypeBits = 8
+	iocSizeBits = 14
+	iocDirBits  = 2
+
+	iocNRShift   = 0
+	iocTypeShift = iocNRShift + iocNRBits
+	iocSizeShift = iocTypeShift + iocTypeBits
+	iocDirShift  = iocSizeShift + iocSizeBits
+
+	iocWrite = 1
+	iocRead  = 2
+
+	mkringContainerIOCMagic = 0xB7
+
+	ioctlWaitReady = uintptr(((iocRead | iocWrite) << iocDirShift) |
+		(mkringContainerIOCMagic << iocTypeShift) |
+		(0x01 << iocNRShift) |
+		(containerWaitReadySize << iocSizeShift))
+	ioctlCall = uintptr(((iocRead | iocWrite) << iocDirShift) |
+		(mkringContainerIOCMagic << iocTypeShift) |
+		(0x03 << iocNRShift) |
+		(containerCallSize << iocSizeShift))
+)
+
+type deviceFile interface {
+	Fd() uintptr
+	Close() error
+}
+
+type fileOpener func(path string) (deviceFile, error)
+type ioctlFunc func(fd uintptr, req uintptr, arg uintptr) error
+
+type DeviceTransport struct {
+	devicePath string
+	open       fileOpener
+	ioctl      ioctlFunc
+}
+
+type containerHeader struct {
+	Magic      uint32
+	Version    uint8
+	Channel    uint8
+	Kind       uint8
+	Operation  uint8
+	Flags      uint16
+	Reserved0  uint16
+	RequestID  uint64
+	Status     int32
+	PayloadLen uint32
+}
+
+type containerMessage struct {
+	Header  containerHeader
+	Payload [containerPayloadSize]byte
+}
+
+type containerWaitReady struct {
+	PeerKernelID uint16
+	Reserved0    uint16
+	TimeoutMS    uint32
+	Ready        uint32
+}
+
+type containerCall struct {
+	PeerKernelID uint16
+	Reserved0    uint16
+	TimeoutMS    uint32
+	Status       int32
+	Request      containerMessage
+	Response     containerMessage
+}
+
+type containerCreateRequest struct {
+	KernelID [mkringContainerMaxKernelID]byte
+	PodID    [mkringContainerMaxPodID]byte
+	Name     [mkringContainerMaxName]byte
+	Image    [mkringContainerMaxImage]byte
+	LogPath  [mkringContainerMaxLogPath]byte
+}
+
+type containerControlRequest struct {
+	KernelID      [mkringContainerMaxKernelID]byte
+	ContainerID   [mkringContainerMaxContainerID]byte
+	TimeoutMillis int64
+}
+
+type containerReadLogRequest struct {
+	KernelID    [mkringContainerMaxKernelID]byte
+	ContainerID [mkringContainerMaxContainerID]byte
+	Offset      uint64
+	MaxBytes    uint32
+}
+
+type containerCreateResponse struct {
+	ContainerID [mkringContainerMaxContainerID]byte
+	ImageRef    [mkringContainerMaxImageRef]byte
+}
+
+type containerStopResponse struct {
+	ExitCode int32
+}
+
+type containerStatusResponse struct {
+	State              uint32
+	ExitCode           int32
+	PID                int32
+	StartedAtUnixNano  uint64
+	FinishedAtUnixNano uint64
+	Message            [mkringContainerMaxErrorMsg]byte
+}
+
+type containerReadLogResponse struct {
+	NextOffset uint64
+	DataLen    uint32
+	EOF        uint8
+	Reserved0  [3]byte
+	Data       [mkringContainerMaxLogChunk]byte
+}
+
+type containerErrorPayload struct {
+	ErrnoValue int32
+	Message    [mkringContainerMaxErrorMsg]byte
+}
+
+func NewDeviceTransport(devicePath string) *DeviceTransport {
+	return &DeviceTransport{
+		devicePath: devicePath,
+		open: func(path string) (deviceFile, error) {
+			return os.OpenFile(path, os.O_RDWR, 0)
+		},
+		ioctl: func(fd uintptr, req uintptr, arg uintptr) error {
+			_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, req, arg)
+			if errno != 0 {
+				return errno
+			}
+			return nil
+		},
+	}
+}
+
+func (t *DeviceTransport) WaitReady(ctx context.Context, peerKernelID uint16, kernelID string, timeout time.Duration) error {
+	timeoutMS, err := effectiveTimeoutMillis(ctx, timeout)
+	if err != nil {
+		return err
+	}
+
+	arg := containerWaitReady{
+		PeerKernelID: peerKernelID,
+		TimeoutMS:    timeoutMS,
+	}
+	buf, err := encodeStruct(arg, containerWaitReadySize)
+	if err != nil {
+		return err
+	}
+
+	if err := t.ioctlOnDevice(ioctlWaitReady, buf); err != nil {
+		return fmt.Errorf("wait ready peer=%d kernel=%s via %s: %w", peerKernelID, kernelID, t.devicePath, err)
+	}
+
+	var result containerWaitReady
+	if err := decodeStruct(buf, &result); err != nil {
+		return err
+	}
+	if result.Ready == 0 {
+		return fmt.Errorf("wait ready peer=%d kernel=%s via %s returned not ready", peerKernelID, kernelID, t.devicePath)
+	}
+	return nil
+}
+
+func (t *DeviceTransport) RoundTrip(ctx context.Context, peerKernelID uint16, req protocol.Envelope) (protocol.Envelope, error) {
+	call, err := t.encodeCall(ctx, peerKernelID, req)
+	if err != nil {
+		return protocol.Envelope{}, err
+	}
+
+	buf, err := encodeStruct(call, containerCallSize)
+	if err != nil {
+		return protocol.Envelope{}, err
+	}
+
+	if err := t.ioctlOnDevice(ioctlCall, buf); err != nil {
+		return protocol.Envelope{}, fmt.Errorf("call peer=%d op=%s via %s: %w", peerKernelID, req.Operation, t.devicePath, err)
+	}
+
+	var result containerCall
+	if err := decodeStruct(buf, &result); err != nil {
+		return protocol.Envelope{}, err
+	}
+
+	return decodeResponseEnvelope(req, result)
+}
+
+func (t *DeviceTransport) encodeCall(ctx context.Context, peerKernelID uint16, req protocol.Envelope) (containerCall, error) {
+	if req.Kind != protocol.MessageKindRequest {
+		return containerCall{}, fmt.Errorf("device transport expects request envelope, got %q", req.Kind)
+	}
+
+	timeoutMS, err := timeoutMillisForRequest(ctx, req)
+	if err != nil {
+		return containerCall{}, err
+	}
+
+	msg, err := encodeRequestMessage(req)
+	if err != nil {
+		return containerCall{}, err
+	}
+
+	return containerCall{
+		PeerKernelID: peerKernelID,
+		TimeoutMS:    timeoutMS,
+		Request:      msg,
+	}, nil
+}
+
+func (t *DeviceTransport) ioctlOnDevice(req uintptr, arg []byte) error {
+	if len(arg) == 0 {
+		return errors.New("empty ioctl buffer")
+	}
+
+	file, err := t.open(t.devicePath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", t.devicePath, err)
+	}
+	defer file.Close()
+
+	err = t.ioctl(file.Fd(), req, uintptr(unsafe.Pointer(&arg[0])))
+	runtime.KeepAlive(arg)
+	runtime.KeepAlive(file)
+	return err
+}
+
+func effectiveTimeoutMillis(ctx context.Context, timeout time.Duration) (uint32, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	effective := timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0, context.DeadlineExceeded
+		}
+		if effective <= 0 || remaining < effective {
+			effective = remaining
+		}
+	}
+
+	if effective <= 0 {
+		return 0, nil
+	}
+
+	millis := effective.Milliseconds()
+	if millis <= 0 {
+		millis = 1
+	}
+	if millis > math.MaxUint32 {
+		millis = math.MaxUint32
+	}
+	return uint32(millis), nil
+}
+
+func timeoutMillisForRequest(ctx context.Context, req protocol.Envelope) (uint32, error) {
+	switch req.Operation {
+	case protocol.OpCreateContainer:
+		return effectiveTimeoutMillis(ctx, 0)
+	case protocol.OpStartContainer, protocol.OpStopContainer, protocol.OpRemoveContainer, protocol.OpStatusContainer:
+		var payload protocol.ContainerControlPayload
+		if err := protocol.DecodePayload(req, &payload); err != nil {
+			return 0, err
+		}
+		return effectiveTimeoutMillis(ctx, time.Duration(payload.TimeoutMillis)*time.Millisecond)
+	case protocol.OpReadLog:
+		return effectiveTimeoutMillis(ctx, 0)
+	default:
+		return 0, fmt.Errorf("unsupported operation %q", req.Operation)
+	}
+}
+
+func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
+	op, err := operationToUAPI(req.Operation)
+	if err != nil {
+		return containerMessage{}, err
+	}
+
+	msg := containerMessage{}
+	msg.Header = containerHeader{
+		Magic:     mkringContainerMagic,
+		Version:   mkringContainerVersion,
+		Channel:   mkringContainerChannel,
+		Kind:      mkringContainerKindRequest,
+		Operation: op,
+	}
+
+	switch req.Operation {
+	case protocol.OpCreateContainer:
+		var payload protocol.CreateContainerPayload
+		if err := protocol.DecodePayload(req, &payload); err != nil {
+			return containerMessage{}, err
+		}
+		create := containerCreateRequest{}
+		if err := copyCString(create.KernelID[:], payload.KernelID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(create.PodID[:], payload.PodID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(create.Name[:], payload.Name); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(create.Image[:], payload.Image); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(create.LogPath[:], payload.LogPath); err != nil {
+			return containerMessage{}, err
+		}
+		encoded, err := encodeStruct(create, containerCreateRequestSize)
+		if err != nil {
+			return containerMessage{}, err
+		}
+		copy(msg.Payload[:], encoded)
+		msg.Header.PayloadLen = uint32(containerCreateRequestSize)
+	case protocol.OpStartContainer, protocol.OpStopContainer, protocol.OpRemoveContainer, protocol.OpStatusContainer:
+		var payload protocol.ContainerControlPayload
+		if err := protocol.DecodePayload(req, &payload); err != nil {
+			return containerMessage{}, err
+		}
+		control := containerControlRequest{TimeoutMillis: payload.TimeoutMillis}
+		if err := copyCString(control.KernelID[:], payload.KernelID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(control.ContainerID[:], payload.ContainerID); err != nil {
+			return containerMessage{}, err
+		}
+		encoded, err := encodeStruct(control, containerControlRequestSize)
+		if err != nil {
+			return containerMessage{}, err
+		}
+		copy(msg.Payload[:], encoded)
+		msg.Header.PayloadLen = uint32(containerControlRequestSize)
+	case protocol.OpReadLog:
+		var payload protocol.ReadLogPayload
+		if err := protocol.DecodePayload(req, &payload); err != nil {
+			return containerMessage{}, err
+		}
+		readLog := containerReadLogRequest{
+			Offset:   payload.Offset,
+			MaxBytes: payload.MaxBytes,
+		}
+		if err := copyCString(readLog.KernelID[:], payload.KernelID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(readLog.ContainerID[:], payload.ContainerID); err != nil {
+			return containerMessage{}, err
+		}
+		encoded, err := encodeStruct(readLog, containerReadLogRequestSize)
+		if err != nil {
+			return containerMessage{}, err
+		}
+		copy(msg.Payload[:], encoded)
+		msg.Header.PayloadLen = uint32(containerReadLogRequestSize)
+	default:
+		return containerMessage{}, fmt.Errorf("unsupported operation %q", req.Operation)
+	}
+
+	return msg, nil
+}
+
+func decodeResponseEnvelope(req protocol.Envelope, call containerCall) (protocol.Envelope, error) {
+	resp := call.Response
+	if resp.Header.Magic != mkringContainerMagic {
+		return protocol.Envelope{}, fmt.Errorf("unexpected response magic 0x%x", resp.Header.Magic)
+	}
+	if resp.Header.Version != mkringContainerVersion {
+		return protocol.Envelope{}, fmt.Errorf("unexpected response version %d", resp.Header.Version)
+	}
+	if resp.Header.Channel != mkringContainerChannel {
+		return protocol.Envelope{}, fmt.Errorf("unexpected response channel %d", resp.Header.Channel)
+	}
+	if resp.Header.Kind != mkringContainerKindResponse {
+		return protocol.Envelope{}, fmt.Errorf("unexpected response kind %d", resp.Header.Kind)
+	}
+	if resp.Header.Operation != call.Request.Header.Operation {
+		return protocol.Envelope{}, fmt.Errorf("unexpected response operation %d", resp.Header.Operation)
+	}
+	if resp.Header.PayloadLen > containerPayloadSize {
+		return protocol.Envelope{}, fmt.Errorf("response payload too large: %d", resp.Header.PayloadLen)
+	}
+
+	status := resp.Header.Status
+	if call.Status != 0 {
+		status = call.Status
+	}
+	if status != 0 {
+		return decodeErrorEnvelope(req, resp, status), nil
+	}
+
+	switch req.Operation {
+	case protocol.OpCreateContainer:
+		if resp.Header.PayloadLen != containerCreateResponseSize {
+			return protocol.Envelope{}, fmt.Errorf("unexpected create response payload length %d", resp.Header.PayloadLen)
+		}
+		var payload containerCreateResponse
+		if err := decodeStruct(resp.Payload[:containerCreateResponseSize], &payload); err != nil {
+			return protocol.Envelope{}, err
+		}
+		return protocol.NewResponse(req, protocol.CreateContainerResult{
+			ContainerID: cString(payload.ContainerID[:]),
+			ImageRef:    cString(payload.ImageRef[:]),
+		})
+	case protocol.OpStartContainer, protocol.OpRemoveContainer:
+		if resp.Header.PayloadLen != 0 {
+			return protocol.Envelope{}, fmt.Errorf("unexpected empty-response payload length %d", resp.Header.PayloadLen)
+		}
+		return protocol.NewResponse(req, struct{}{})
+	case protocol.OpStopContainer:
+		if resp.Header.PayloadLen != containerStopResponseSize {
+			return protocol.Envelope{}, fmt.Errorf("unexpected stop response payload length %d", resp.Header.PayloadLen)
+		}
+		var payload containerStopResponse
+		if err := decodeStruct(resp.Payload[:containerStopResponseSize], &payload); err != nil {
+			return protocol.Envelope{}, err
+		}
+		return protocol.NewResponse(req, protocol.StopContainerResult{ExitCode: payload.ExitCode})
+	case protocol.OpStatusContainer:
+		if resp.Header.PayloadLen != containerStatusResponseSize {
+			return protocol.Envelope{}, fmt.Errorf("unexpected status response payload length %d", resp.Header.PayloadLen)
+		}
+		var payload containerStatusResponse
+		if err := decodeStruct(resp.Payload[:containerStatusResponseSize], &payload); err != nil {
+			return protocol.Envelope{}, err
+		}
+		return protocol.NewResponse(req, protocol.ContainerStatusResult{
+			State:              uapiStateToProtocol(payload.State),
+			ExitCode:           payload.ExitCode,
+			PID:                payload.PID,
+			StartedAtUnixNano:  payload.StartedAtUnixNano,
+			FinishedAtUnixNano: payload.FinishedAtUnixNano,
+			Message:            cString(payload.Message[:]),
+		})
+	case protocol.OpReadLog:
+		if resp.Header.PayloadLen != containerReadLogResponseSize {
+			return protocol.Envelope{}, fmt.Errorf("unexpected read-log response payload length %d", resp.Header.PayloadLen)
+		}
+		var payload containerReadLogResponse
+		if err := decodeStruct(resp.Payload[:containerReadLogResponseSize], &payload); err != nil {
+			return protocol.Envelope{}, err
+		}
+		if payload.DataLen > mkringContainerMaxLogChunk {
+			return protocol.Envelope{}, fmt.Errorf("read-log response data too large: %d", payload.DataLen)
+		}
+		data := make([]byte, payload.DataLen)
+		copy(data, payload.Data[:payload.DataLen])
+		return protocol.NewResponse(req, protocol.ReadLogResult{
+			NextOffset: payload.NextOffset,
+			EOF:        payload.EOF != 0,
+			Data:       data,
+		})
+	default:
+		return protocol.Envelope{}, fmt.Errorf("unsupported operation %q", req.Operation)
+	}
+}
+
+func decodeErrorEnvelope(req protocol.Envelope, resp containerMessage, status int32) protocol.Envelope {
+	message := fmt.Sprintf("remote error: status=%d", status)
+	code := statusCodeString(status)
+
+	if resp.Header.PayloadLen == containerErrorPayloadSize {
+		var payload containerErrorPayload
+		if err := decodeStruct(resp.Payload[:containerErrorPayloadSize], &payload); err == nil {
+			if payload.ErrnoValue != 0 {
+				code = statusCodeString(payload.ErrnoValue)
+			}
+			if text := cString(payload.Message[:]); text != "" {
+				message = text
+			}
+		}
+	}
+
+	return protocol.NewErrorResponse(req, code, message)
+}
+
+func operationToUAPI(op protocol.Operation) (uint8, error) {
+	switch op {
+	case protocol.OpCreateContainer:
+		return mkringContainerOpCreate, nil
+	case protocol.OpStartContainer:
+		return mkringContainerOpStart, nil
+	case protocol.OpStopContainer:
+		return mkringContainerOpStop, nil
+	case protocol.OpRemoveContainer:
+		return mkringContainerOpRemove, nil
+	case protocol.OpStatusContainer:
+		return mkringContainerOpStatus, nil
+	case protocol.OpReadLog:
+		return mkringContainerOpReadLog, nil
+	default:
+		return 0, fmt.Errorf("unsupported operation %q", op)
+	}
+}
+
+func uapiStateToProtocol(state uint32) protocol.ContainerStatusState {
+	switch state {
+	case 1:
+		return protocol.ContainerStatusCreated
+	case 2:
+		return protocol.ContainerStatusRunning
+	case 3:
+		return protocol.ContainerStatusExited
+	default:
+		return protocol.ContainerStatusUnknown
+	}
+}
+
+func statusCodeString(status int32) string {
+	if status < 0 {
+		return fmt.Sprintf("errno_%d", -status)
+	}
+	return fmt.Sprintf("status_%d", status)
+}
+
+func cString(buf []byte) string {
+	if i := bytes.IndexByte(buf, 0); i >= 0 {
+		buf = buf[:i]
+	}
+	return string(buf)
+}
+
+func copyCString(dst []byte, value string) error {
+	if len(value) > len(dst) {
+		return fmt.Errorf("field too long: got=%d max=%d", len(value), len(dst))
+	}
+	copy(dst, value)
+	return nil
+}
+
+func encodeStruct(v interface{}, expectedSize int) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, v); err != nil {
+		return nil, err
+	}
+	if expectedSize > 0 && buf.Len() != expectedSize {
+		return nil, fmt.Errorf("unexpected struct size: got=%d want=%d", buf.Len(), expectedSize)
+	}
+	return buf.Bytes(), nil
+}
+
+func decodeStruct(data []byte, out interface{}) error {
+	return binary.Read(bytes.NewReader(data), binary.LittleEndian, out)
+}

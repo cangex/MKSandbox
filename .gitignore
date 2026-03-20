@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+
+# Editors
+*.swp
+*.swo
+*~
+
+# Go build/test artifacts
+*.test
+*.out
+coverage.out
+
+# Host runtime artifacts
+.host-run/
+
+# mk-container binary
+/mk-container/mkcri
+
+# mkring-bridge binary
+/mkring-bridge/mkring-bridge
+
+# mk-guest-agent build artifacts
+/mk-guest-agent/mk-guest-agent
+/mk-guest-agent/src/*.o
+/mk-guest-agent/tests/test_agent
+
+# Linux kernel/module build artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.symvers
+*.order
+Module.symvers
+modules.order
+.*.cmd
+

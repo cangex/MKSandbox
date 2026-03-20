@@ -1,0 +1,272 @@
+#!/bin/busybox sh
+
+set -u
+cd /
+
+BB=/bin/busybox
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+
+bb() {
+	"$BB" "$@"
+}
+
+for cmd in $($BB --list); do
+	bb ln -sf "$BB" "/bin/$cmd" 2>/dev/null || true
+done
+
+cmdline_get() {
+	key="$1"
+	for tok in $(bb cat /proc/cmdline 2>/dev/null); do
+		case "$tok" in
+			"$key"=*)
+				echo "${tok#*=}"
+				return 0
+				;;
+		esac
+	done
+	return 1
+}
+
+fatal() {
+	echo "guest init: $*" >&2
+	echo "guest init: dropping to shell" >&2
+	exec $BB sh
+}
+
+wait_for_path() {
+	path="$1"
+	timeout="${2:-10}"
+	i=0
+
+	while [ "$i" -lt "$timeout" ]; do
+		[ -e "$path" ] && return 0
+		bb sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+wait_for_socket() {
+	path="$1"
+	timeout="${2:-20}"
+	i=0
+
+	while [ "$i" -lt "$timeout" ]; do
+		[ -S "$path" ] && return 0
+		bb sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
+find_existing_path() {
+	for path in "$@"; do
+		[ -n "$path" ] || continue
+		[ -e "$path" ] && {
+			echo "$path"
+			return 0
+		}
+	done
+	return 1
+}
+
+containerd_is_ready() {
+	[ -S "$CONTAINERD_SOCKET" ] || return 1
+	"$CTR_BIN" --address "$CONTAINERD_SOCKET" version >/dev/null 2>&1
+}
+
+mount_core_fs() {
+	bb mkdir -p /proc /sys /dev /run /tmp /sys/fs/cgroup /var/lib/containerd /var/log
+
+	bb mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+	bb mount -t proc proc /proc || fatal "mount /proc failed"
+	bb mount -t sysfs sysfs /sys || fatal "mount /sys failed"
+	bb mount -t tmpfs tmpfs /run 2>/dev/null || true
+	bb mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+	bb mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
+}
+
+ensure_basic_dev_nodes() {
+	[ -e /dev/mem ] || bb mknod /dev/mem c 1 1
+	[ -e /dev/random ] || bb mknod /dev/random c 1 8
+	[ -e /dev/urandom ] || bb mknod /dev/urandom c 1 9
+	[ -e /dev/null ] || bb mknod /dev/null c 1 3
+	[ -e /dev/tty ] || bb mknod /dev/tty c 4 1
+	[ -e /dev/console ] || bb mknod /dev/console c 5 1
+}
+
+prepare_runtime_links() {
+	bb mkdir -p /sbin /usr/bin /usr/sbin
+	[ -x /bin/runc ] && bb ln -sf /bin/runc /sbin/runc
+	[ -x /bin/runc ] && bb ln -sf /bin/runc /usr/bin/runc
+}
+
+ensure_overlay_ready() {
+	if bb grep -q '^nodev[[:space:]]\+overlay$' /proc/filesystems 2>/dev/null; then
+		return 0
+	fi
+
+	if [ -n "$OVERLAY_MODULE" ] && [ -f "$OVERLAY_MODULE" ]; then
+		bb insmod "$OVERLAY_MODULE" 2>/tmp/overlay.insmod.log || true
+	fi
+
+	bb grep -q '^nodev[[:space:]]\+overlay$' /proc/filesystems 2>/dev/null || \
+		fatal "overlay filesystem is not available"
+}
+
+ensure_guest_bridge_device() {
+	if [ -e "$BRIDGE_DEVICE" ]; then
+		return 0
+	fi
+
+	if command -v modprobe >/dev/null 2>&1; then
+		modprobe mkring_container_bridge role=guest "device_name=$BRIDGE_DEVICE_NAME" \
+			2>/tmp/mkring-bridge.modprobe.log || true
+	fi
+
+	if [ ! -e "$BRIDGE_DEVICE" ] && [ -f "$BRIDGE_MODULE" ]; then
+		bb insmod "$BRIDGE_MODULE" role=guest "device_name=$BRIDGE_DEVICE_NAME" \
+			2>/tmp/mkring-bridge.insmod.log || true
+	fi
+
+	wait_for_path "$BRIDGE_DEVICE" 10 || fatal "guest bridge device not ready: $BRIDGE_DEVICE"
+}
+
+start_containerd() {
+	[ -x "$CONTAINERD_BIN" ] || fatal "containerd not found: $CONTAINERD_BIN"
+	[ -x "$CTR_BIN" ] || fatal "ctr not found: $CTR_BIN"
+
+	if containerd_is_ready; then
+		return 0
+	fi
+
+	if [ -n "$CONTAINERD_CONFIG" ] && [ -f "$CONTAINERD_CONFIG" ]; then
+		"$CONTAINERD_BIN" --config "$CONTAINERD_CONFIG" >>"$CONTAINERD_LOG" 2>&1 &
+	else
+		"$CONTAINERD_BIN" >>"$CONTAINERD_LOG" 2>&1 &
+	fi
+	CONTAINERD_PID=$!
+	echo "$CONTAINERD_PID" > /run/containerd.pid
+
+	wait_for_socket "$CONTAINERD_SOCKET" 20 || fatal "containerd socket not created: $CONTAINERD_SOCKET"
+
+	i=0
+	while [ "$i" -lt 20 ]; do
+		if containerd_is_ready; then
+			return 0
+		fi
+		bb sleep 1
+		i=$((i + 1))
+	done
+
+	fatal "containerd started but ctr version still fails"
+}
+
+import_image_if_present() {
+	[ -n "$IMAGE_TAR" ] || return 0
+	[ -f "$IMAGE_TAR" ] || return 0
+
+	"$CTR_BIN" --address "$CONTAINERD_SOCKET" --namespace "$CONTAINERD_NAMESPACE" \
+		image import "$IMAGE_TAR" \
+		>>"$CONTAINERD_LOG" 2>&1 || fatal "ctr image import failed: $IMAGE_TAR"
+}
+
+start_guest_agent() {
+	[ -x "$AGENT_BIN" ] || fatal "mk-guest-agent not found: $AGENT_BIN"
+
+	MK_GUEST_AGENT_TRANSPORT=mkring-device \
+	MK_GUEST_AGENT_RUNTIME=containerd \
+	MK_GUEST_AGENT_BRIDGE_DEVICE="$BRIDGE_DEVICE" \
+	MK_GUEST_AGENT_PEER_KERNEL_ID="$PEER_KERNEL_ID" \
+	MK_GUEST_AGENT_CONTAINERD_SOCKET="$CONTAINERD_SOCKET" \
+	MK_GUEST_AGENT_CTR_PATH="$CTR_BIN" \
+	MK_GUEST_AGENT_CONTAINERD_NAMESPACE="$CONTAINERD_NAMESPACE" \
+	MK_GUEST_AGENT_RUNC_BINARY="/bin/runc" \
+	MK_GUEST_AGENT_CONTAINERD_NO_PIVOT=1 \
+	MK_GUEST_AGENT_CONTAINERD_START_VIA_RUN=1 \
+	"$AGENT_BIN" >>"$AGENT_LOG" 2>&1 &
+
+	AGENT_PID=$!
+	echo "$AGENT_PID" > /run/mk-guest-agent.pid
+	bb sleep 1
+
+	kill -0 "$AGENT_PID" 2>/dev/null || fatal "mk-guest-agent exited early; check $AGENT_LOG"
+}
+
+print_summary() {
+	bb cat <<EOF
+guest init complete
+
+bridge device: $BRIDGE_DEVICE
+containerd socket: $CONTAINERD_SOCKET
+containerd log: $CONTAINERD_LOG
+mk-guest-agent log: $AGENT_LOG
+peer kernel id: $PEER_KERNEL_ID
+namespace: $CONTAINERD_NAMESPACE
+containerd config: ${CONTAINERD_CONFIG:-<default>}
+image tar: ${IMAGE_TAR:-<none>}
+EOF
+}
+
+BRIDGE_DEVICE="$(cmdline_get mkga.bridge_device || echo /dev/mkring_container_bridge)"
+BRIDGE_DEVICE_NAME="${BRIDGE_DEVICE##*/}"
+BRIDGE_MODULE="$(cmdline_get mkga.bridge_module || true)"
+PEER_KERNEL_ID="$(cmdline_get mkga.peer_kernel_id || echo 0)"
+CONTAINERD_BIN="$(cmdline_get mkga.containerd_bin || true)"
+CTR_BIN="$(cmdline_get mkga.ctr_bin || true)"
+AGENT_BIN="$(cmdline_get mkga.agent_bin || true)"
+CONTAINERD_SOCKET="$(cmdline_get mkga.containerd_socket || echo /run/containerd/containerd.sock)"
+CONTAINERD_NAMESPACE="$(cmdline_get mkga.namespace || echo mk)"
+CONTAINERD_CONFIG="$(cmdline_get mkga.containerd_config || true)"
+IMAGE_TAR="$(cmdline_get mkga.image_tar || true)"
+OVERLAY_MODULE="$(cmdline_get mkga.overlay_module || true)"
+CONTAINERD_LOG=/tmp/containerd.log
+AGENT_LOG=/tmp/mk-guest-agent.log
+
+BRIDGE_MODULE="$(find_existing_path \
+	"$BRIDGE_MODULE" \
+	"/mkring_container_bridge.ko" \
+	"/lib/modules/mkring_container_bridge.ko" \
+	"/modules/mkring_container_bridge.ko" || true)"
+CONTAINERD_BIN="$(find_existing_path \
+	"$CONTAINERD_BIN" \
+	"/bin/containerd" \
+	"/usr/bin/containerd" \
+	"/sbin/containerd" \
+	"/usr/sbin/containerd" || true)"
+CTR_BIN="$(find_existing_path \
+	"$CTR_BIN" \
+	"/bin/ctr" \
+	"/usr/bin/ctr" \
+	"/sbin/ctr" \
+	"/usr/sbin/ctr" || true)"
+AGENT_BIN="$(find_existing_path \
+	"$AGENT_BIN" \
+	"/bin/mk-guest-agent" \
+	"/usr/bin/mk-guest-agent" || true)"
+CONTAINERD_CONFIG="$(find_existing_path \
+	"$CONTAINERD_CONFIG" \
+	"/containerd/config/config.toml" \
+	"/etc/containerd/config.toml" || true)"
+IMAGE_TAR="$(find_existing_path \
+	"$IMAGE_TAR" \
+	"/images/hello-world.tar" || true)"
+OVERLAY_MODULE="$(find_existing_path \
+	"$OVERLAY_MODULE" \
+	"/overlay.ko" \
+	"/lib/modules/overlay.ko" \
+	"/modules/overlay.ko" || true)"
+
+mount_core_fs
+ensure_basic_dev_nodes
+prepare_runtime_links
+ensure_overlay_ready
+ensure_guest_bridge_device
+start_containerd
+import_image_if_present
+start_guest_agent
+print_summary
+
+echo "Init OK; launch a shell"
+exec $BB sh

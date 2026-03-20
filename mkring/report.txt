@@ -1,0 +1,141 @@
+【mkring 项目组会汇报稿】
+
+一、项目背景与目标
+1. 背景
+- 在 multikernel 场景中，不同 kernel 共享同一片物理内存，但 CPU 资源隔离。
+- 我们需要一套跨 kernel 的高效通信机制，避免依赖传统设备模型。
+
+2. 目标
+- 实现 mkring：一个内核通信组件（不是设备）。
+- 使用 vring 风格共享内存队列（desc/avail/used/data）。
+- 数据写入共享内存后，通过 IPI 通知目标 kernel。
+- 支持任意 kernel i -> j（i != j）双向通信。
+
+二、当前实现范围（已完成）
+1. mkring 主体
+- 文件：mkring.c + mkring.h
+- 提供核心 API：
+  - mkring_init / mkring_exit
+  - mkring_send / mkring_recv
+  - mkring_register_rx_cb / mkring_unregister_rx_cb
+  - mkring_register_ipi_notify / mkring_unregister_ipi_notify
+  - mkring_ipi_interrupt / mkring_handle_ipi_all
+
+2. 内置初始化入口
+- 文件：init_mk.c
+- 通过 __setup 解析内核参数，在 subsys_initcall(init_mk) 调用 mkring_init。
+- IPI 默认后端（x86 APIC）支持：
+  - mkring.ipi_vector
+  - mkring.ipi_dests（kernel_id -> APIC ID 映射）
+
+3. 资源管理增强
+- mkring 初始化时调用 request_mem_region("mkring-shm")，会在 /proc/iomem 中注册共享内存区域。
+- 退出时 release_mem_region 对称释放。
+
+4. 可靠性改进
+- mkring_send 增加目标就绪检查：
+  - 若目标 ready_bitmap 未置位，返回 -ENOLINK。
+- notify 未注册时返回 -ENOTCONN。
+
+5. IPI 相关清理
+- 命名统一：mkring_handle_ipi_all（替代 ipc 命名）。
+- 删除了 ipc_irq 相关逻辑，完全采用 IPI 路径。
+
+三、核心架构与共享内存布局
+1. 全局布局
+- 共享区 = mkring_shm_hdr + kernels*kernels 个单向 queue。
+- queue(src,dst) 与 queue(dst,src) 分离，互不抢占 descriptor。
+
+2. 单 queue 布局
+- desc table
+- avail ring（发送端提交）
+- used ring（接收端回执）
+- data slots（真实 payload）
+
+3. 关键数据结构
+- mkring_shm_hdr：全局参数与状态（magic/version/kernels/desc_num/msg_size/queue_size/init_state/ready_bitmap）。
+- mkring_layout：单 queue 各区偏移。
+- mkring_queue：本地运行时视图（tx/rx 游标、锁、回调、inflight 位图）。
+
+四、数据通信函数调用链（重点）
+1. 启动阶段
+- kernel cmdline -> init_mk(__setup)
+- subsys_initcall(init_mk) -> mkring_init
+- mkring_init:
+  - mkring_calc_layout
+  - request_mem_region + memremap
+  - mkring_prepare_shared（初始化/兼容性检查/ready_bitmap）
+  - mkring_queue_setup（建立 txq/rxq 本地视图）
+
+2. 发送阶段（Kernel A -> Kernel B）
+- mkring_send(dst, data, len)
+  - 参数检查
+  - ready_bitmap 检查（失败 -ENOLINK）
+  - notify 检查（失败 -ENOTCONN）
+  - mkring_tx_enqueue（写 data/desc/avail）
+  - notify(src,dst,priv) -> APIC IPI
+
+3. 接收阶段（Kernel B）
+- IPI vector 入口（平台代码）
+  -> mkring_ipi_interrupt
+  -> mkring_handle_ipi_all
+  -> mkring_process_rx_queue
+  -> mkring_rx_enqueue_local
+  -> 回调模式：调用已注册 rx_cb
+  -> 拉取模式：mkring_recv 从本地 rx_msgs 取包
+
+4. 回收阶段
+- 发送端下一次入队前调用 mkring_tx_reclaim_locked
+- 扫描 used ring，清 inflight 位图，释放 desc。
+
+五、关键内核参数（运行必须）
+1. 必填参数
+- mkring.shm_phys
+- mkring.shm_size
+- mkring.kernel_id
+
+2. 关键一致性参数（各 kernel 必须一致）
+- mkring.kernels
+- mkring.desc_num
+- mkring.msg_size
+- mkring.ipi_vector
+- mkring.ipi_dests
+
+3. 典型双 kernel 启动参数
+- kernel0:
+  mkring.shm_phys=0x400000000 mkring.shm_size=0x1000000 mkring.kernels=2 mkring.desc_num=256 mkring.msg_size=1024 mkring.ipi_vector=0xF5 mkring.ipi_dests=0,1 mkring.force_init=1 mkring.kernel_id=0
+- kernel1:
+  mkring.shm_phys=0x400000000 mkring.shm_size=0x1000000 mkring.kernels=2 mkring.desc_num=256 mkring.msg_size=1024 mkring.ipi_vector=0xF5 mkring.ipi_dests=0,1 mkring.force_init=0 mkring.kernel_id=1
+
+六、测试方案（当前版本）
+1. 测试模块
+- mkring_test.c 已改为可加载模块（非内置）。
+- 通过 insmod 启动测试，rmmod 停止。
+
+2. 运行方式
+- kernel0: insmod mkring_test.ko peer=1 period_ms=200 report_sec=3
+- kernel1: insmod mkring_test.ko peer=0 period_ms=200 report_sec=3
+- 观察: dmesg -w | grep -E "mkring|mkring-test"
+
+3. 判定标准
+- 两侧出现 started 日志。
+- tx_ok/rx_ok 持续增长。
+- rx_bad 保持 0。
+- tx_fail 仅允许启动初期少量波动。
+
+七、当前已知边界与风险
+1. 当前 mkring 只提供内核符号接口，没有用户态 ioctl/netlink 桥接。
+2. 发送前有目标 ready 检查，但如果目标状态频繁波动，需要业务侧重试策略。
+3. IPI vector 与平台冲突风险，需要在 irq_vectors.h/IDT 注册侧统一管理。
+4. mkring.ipi_dests 必须是真实 APIC ID 映射，不一定等于逻辑 CPU 编号。
+
+八、下一步计划
+1. 做稳定性压测（高频发送、长时运行、异常重启恢复）。
+2. 增加更细粒度统计（每方向队列延迟、丢包、回收滞后）。
+3. 视需求补用户态桥接层（miscdevice + ioctl）。
+4. 若进入产品化，补充 Kconfig 开关与自动化自测脚本。
+
+九、汇报时可用的结论句
+- mkring 已实现“共享内存 + IPI 通知”的跨 kernel 通信闭环。
+- 初始化、发送、接收、回收路径均已打通，且具备基础错误码与就绪检查。
+- 当前已进入可联调、可压测阶段，下一步重点是稳定性与工程化落地。
