@@ -1987,16 +1987,27 @@ static int mkga_containerd_stop_container(struct mkga_runtime *runtime,
 		return rc;
 	}
 
-	rc = mkga_containerd_wait_for_exit(impl, req->container_id, timeout_ms,
-					   &exit_code);
+	if (impl->start_via_run) {
+		rc = mkga_containerd_poll_for_exit(impl, req->container_id, timeout_ms,
+						   &exit_code);
+	} else {
+		rc = mkga_containerd_wait_for_exit(impl, req->container_id, timeout_ms,
+						   &exit_code);
+	}
 	if (rc == -ETIMEDOUT) {
 		rc = mkga_containerd_signal_task(impl, req->container_id, "SIGKILL");
 		if (rc != 0 && rc != -ENOENT) {
 			return rc;
 		}
-		rc = mkga_containerd_wait_for_exit(impl, req->container_id,
-						   impl->default_timeout_ms,
-						   &exit_code);
+		if (impl->start_via_run) {
+			rc = mkga_containerd_poll_for_exit(impl, req->container_id,
+							   impl->default_timeout_ms,
+							   &exit_code);
+		} else {
+			rc = mkga_containerd_wait_for_exit(impl, req->container_id,
+							   impl->default_timeout_ms,
+							   &exit_code);
+		}
 	}
 	if (rc != 0) {
 		return rc;
@@ -2082,8 +2093,16 @@ static int mkga_containerd_status_container(struct mkga_runtime *runtime,
 	if (state.state == MKGA_CONTAINER_STATE_RUNNING) {
 		rc = mkga_containerd_query_task_status(impl, req->container_id, &task_status, &pid);
 		if (rc == 0) {
-			if (task_status == MKGA_CONTAINERD_TASK_STATUS_STOPPED ||
-			    task_status == MKGA_CONTAINERD_TASK_STATUS_MISSING) {
+			if (task_status == MKGA_CONTAINERD_TASK_STATUS_STOPPED) {
+				state.state = MKGA_CONTAINER_STATE_EXITED;
+				state.pid = 0;
+				if (state.finished_at_unix_nano == 0) {
+					state.finished_at_unix_nano = mkga_now_realtime_nanos();
+				}
+				state.message[0] = '\0';
+				(void)mkga_containerd_write_state(impl, req->container_id, &state);
+			} else if (task_status == MKGA_CONTAINERD_TASK_STATUS_MISSING &&
+				   !impl->start_via_run) {
 				state.state = MKGA_CONTAINER_STATE_EXITED;
 				state.pid = 0;
 				if (state.finished_at_unix_nano == 0) {

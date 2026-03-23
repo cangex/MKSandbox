@@ -163,13 +163,16 @@ start_containerd() {
 	fatal "containerd started but ctr version still fails"
 }
 
-import_image_if_present() {
-	[ -n "$IMAGE_TAR" ] || return 0
-	[ -f "$IMAGE_TAR" ] || return 0
+import_images_if_present() {
+	[ -d "$IMAGE_DIR" ] || return 0
 
-	"$CTR_BIN" --address "$CONTAINERD_SOCKET" --namespace "$CONTAINERD_NAMESPACE" \
-		image import "$IMAGE_TAR" \
-		>>"$CONTAINERD_LOG" 2>&1 || fatal "ctr image import failed: $IMAGE_TAR"
+	for image_tar in "$IMAGE_DIR"/*; do
+		[ -f "$image_tar" ] || continue
+
+		"$CTR_BIN" --address "$CONTAINERD_SOCKET" --namespace "$CONTAINERD_NAMESPACE" \
+			image import "$image_tar" \
+			>>"$CONTAINERD_LOG" 2>&1 || fatal "ctr image import failed: $image_tar"
+	done
 }
 
 start_guest_agent() {
@@ -205,7 +208,7 @@ mk-guest-agent log: $AGENT_LOG
 peer kernel id: $PEER_KERNEL_ID
 namespace: $CONTAINERD_NAMESPACE
 containerd config: ${CONTAINERD_CONFIG:-<default>}
-image tar: ${IMAGE_TAR:-<none>}
+image dir: ${IMAGE_DIR:-<none>}
 EOF
 }
 
@@ -219,7 +222,7 @@ AGENT_BIN="$(cmdline_get mkga.agent_bin || true)"
 CONTAINERD_SOCKET="$(cmdline_get mkga.containerd_socket || echo /run/containerd/containerd.sock)"
 CONTAINERD_NAMESPACE="$(cmdline_get mkga.namespace || echo mk)"
 CONTAINERD_CONFIG="$(cmdline_get mkga.containerd_config || true)"
-IMAGE_TAR="$(cmdline_get mkga.image_tar || true)"
+IMAGE_DIR="$(cmdline_get mkga.image_dir || echo /images)"
 OVERLAY_MODULE="$(cmdline_get mkga.overlay_module || true)"
 CONTAINERD_LOG=/tmp/containerd.log
 AGENT_LOG=/tmp/mk-guest-agent.log
@@ -249,9 +252,6 @@ CONTAINERD_CONFIG="$(find_existing_path \
 	"$CONTAINERD_CONFIG" \
 	"/containerd/config/config.toml" \
 	"/etc/containerd/config.toml" || true)"
-IMAGE_TAR="$(find_existing_path \
-	"$IMAGE_TAR" \
-	"/images/hello-world.tar" || true)"
 OVERLAY_MODULE="$(find_existing_path \
 	"$OVERLAY_MODULE" \
 	"/overlay.ko" \
@@ -264,7 +264,7 @@ prepare_runtime_links
 ensure_overlay_ready
 ensure_guest_bridge_device
 start_containerd
-import_image_if_present
+import_images_if_present
 start_guest_agent
 print_summary
 
