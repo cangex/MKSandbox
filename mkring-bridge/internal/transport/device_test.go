@@ -131,6 +131,21 @@ func TestDeviceTransportRoundTripCreate(t *testing.T) {
 		if got := cString(createReq.LogPath[:]); got != "/var/log/ctr-a.log" {
 			t.Fatalf("unexpected log path: %q", got)
 		}
+		if createReq.ArgvCount != 4 {
+			t.Fatalf("unexpected argv count: %d", createReq.ArgvCount)
+		}
+		if got := cString(createReq.Argv[0][:]); got != "sh" {
+			t.Fatalf("unexpected argv[0]: %q", got)
+		}
+		if got := cString(createReq.Argv[1][:]); got != "-c" {
+			t.Fatalf("unexpected argv[1]: %q", got)
+		}
+		if got := cString(createReq.Argv[2][:]); got != "echo tick" {
+			t.Fatalf("unexpected argv[2]: %q", got)
+		}
+		if got := cString(createReq.Argv[3][:]); got != "--flag" {
+			t.Fatalf("unexpected argv[3]: %q", got)
+		}
 
 		createResp := containerCreateResponse{}
 		if err := copyCString(createResp.ContainerID[:], "container-123"); err != nil {
@@ -168,6 +183,8 @@ func TestDeviceTransportRoundTripCreate(t *testing.T) {
 		PodID:    "pod-a",
 		Name:     "ctr-a",
 		Image:    "busybox:latest",
+		Command:  []string{"sh", "-c", "echo tick"},
+		Args:     []string{"--flag"},
 		LogPath:  "/var/log/ctr-a.log",
 	})
 	if err != nil {

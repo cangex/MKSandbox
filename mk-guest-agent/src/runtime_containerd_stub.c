@@ -41,6 +41,8 @@ struct mkga_containerd_runtime {
 
 struct mkga_containerd_metadata {
 	char image[MKGA_MAX_IMAGE_LEN];
+	uint32_t argv_count;
+	char argv[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN];
 };
 
 struct mkga_containerd_state {
@@ -789,10 +791,17 @@ static int mkga_containerd_write_metadata(struct mkga_containerd_runtime *impl,
 		return -errno;
 	}
 
-	if (fprintf(fp, "%s\n", meta->image) < 0) {
+	if (fprintf(fp, "%s\n%u\n", meta->image, meta->argv_count) < 0) {
 		rc = -EIO;
 		(void)fclose(fp);
 		return rc;
+	}
+	for (uint32_t i = 0; i < meta->argv_count; i++) {
+		if (fprintf(fp, "%s\n", meta->argv[i]) < 0) {
+			rc = -EIO;
+			(void)fclose(fp);
+			return rc;
+		}
 	}
 	if (fclose(fp) != 0) {
 		return -errno;
@@ -808,6 +817,7 @@ static int mkga_containerd_read_metadata(struct mkga_containerd_runtime *impl,
 	char path[MKGA_MAX_LOG_PATH_LEN];
 	FILE *fp = NULL;
 	char line[MKGA_MAX_IMAGE_LEN];
+	char count_line[32];
 	char *newline;
 	int rc;
 
@@ -836,6 +846,30 @@ static int mkga_containerd_read_metadata(struct mkga_containerd_runtime *impl,
 		*newline = '\0';
 	}
 	mkga_copy_string(meta->image, sizeof(meta->image), line);
+	if (!fgets(count_line, sizeof(count_line), fp)) {
+		rc = ferror(fp) ? -EIO : -ENOENT;
+		(void)fclose(fp);
+		return rc;
+	}
+	meta->argv_count = (uint32_t)strtoul(count_line, NULL, 10);
+	if (meta->argv_count > MKGA_MAX_ARGV) {
+		(void)fclose(fp);
+		return -EINVAL;
+	}
+	for (uint32_t i = 0; i < meta->argv_count; i++) {
+		char arg_line[MKGA_MAX_ARG_LEN];
+
+		if (!fgets(arg_line, sizeof(arg_line), fp)) {
+			rc = ferror(fp) ? -EIO : -ENOENT;
+			(void)fclose(fp);
+			return rc;
+		}
+		newline = strchr(arg_line, '\n');
+		if (newline) {
+			*newline = '\0';
+		}
+		mkga_copy_string(meta->argv[i], sizeof(meta->argv[i]), arg_line);
+	}
 
 	if (fclose(fp) != 0) {
 		return -errno;
@@ -1084,6 +1118,9 @@ static int mkga_containerd_make_container_id(const struct mkga_create_container_
 	hash = mkga_fnv1a64_update(hash, req->pod_id);
 	hash = mkga_fnv1a64_update(hash, req->name);
 	hash = mkga_fnv1a64_update(hash, req->image);
+	for (uint32_t i = 0; i < req->argv_count && i < MKGA_MAX_ARGV; i++) {
+		hash = mkga_fnv1a64_update(hash, req->argv[i]);
+	}
 
 	if (snprintf(out_id, out_len, "mkc-%016llx",
 		     (unsigned long long)hash) >= (int)out_len) {
@@ -1122,7 +1159,36 @@ static int mkga_containerd_validate_create_req(const struct mkga_create_containe
 	    req->name[0] == '\0' || req->image[0] == '\0') {
 		return -EINVAL;
 	}
+	if (req->argv_count > MKGA_MAX_ARGV) {
+		return -EINVAL;
+	}
+	for (uint32_t i = 0; i < req->argv_count; i++) {
+		if (req->argv[i][0] == '\0') {
+			return -EINVAL;
+		}
+	}
 	return 0;
+}
+
+static int mkga_containerd_append_exec_argv(char *argv[],
+					    int argc,
+					    int argv_max,
+					    uint32_t exec_argc,
+					    char exec_argv[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN])
+{
+	if (!argv || argc < 0 || argv_max <= 0) {
+		return -EINVAL;
+	}
+	if (exec_argc > MKGA_MAX_ARGV) {
+		return -EINVAL;
+	}
+	for (uint32_t i = 0; i < exec_argc; i++) {
+		if (argc >= argv_max - 1) {
+			return -E2BIG;
+		}
+		argv[argc++] = (char *)exec_argv[i];
+	}
+	return argc;
 }
 
 static int mkga_containerd_validate_control_req(const struct mkga_container_control_req *req)
@@ -1470,6 +1536,8 @@ static int mkga_containerd_wait_for_exit(struct mkga_containerd_runtime *impl,
 static int mkga_containerd_run_logged_foreground(struct mkga_containerd_runtime *impl,
 						 const char *container_id,
 						 const char *image,
+						 uint32_t argv_count,
+						 char argv_items[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN],
 						 const char *log_path)
 {
 	struct mkga_containerd_state state;
@@ -1498,6 +1566,11 @@ static int mkga_containerd_run_logged_foreground(struct mkga_containerd_runtime 
 	}
 	argv[argc++] = (char *)image;
 	argv[argc++] = (char *)container_id;
+	argc = mkga_containerd_append_exec_argv(argv, argc, MKGA_CONTAINERD_ARGV_MAX,
+					       argv_count, argv_items);
+	if (argc < 0) {
+		return argc;
+	}
 	argv[argc] = NULL;
 
 	rc = mkga_ctr_exec_to_cri_log(impl, argv, log_path, &exit_code, stderr_buf,
@@ -1521,7 +1594,9 @@ static int mkga_containerd_run_logged_foreground(struct mkga_containerd_runtime 
 
 static int mkga_containerd_spawn_log_runner(struct mkga_containerd_runtime *impl,
 					    const char *container_id,
-					    const char *image)
+					    const char *image,
+					    uint32_t argv_count,
+					    char argv_items[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN])
 {
 	char log_path[MKGA_MAX_LOG_PATH_LEN];
 	pid_t child;
@@ -1554,7 +1629,8 @@ static int mkga_containerd_spawn_log_runner(struct mkga_containerd_runtime *impl
 		}
 
 		(void)setsid();
-		(void)mkga_containerd_run_logged_foreground(impl, container_id, image, log_path);
+		(void)mkga_containerd_run_logged_foreground(impl, container_id, image,
+							   argv_count, argv_items, log_path);
 		_exit(0);
 	}
 
@@ -1760,6 +1836,10 @@ static int mkga_containerd_create_container(struct mkga_runtime *runtime,
 
 	memset(&meta, 0, sizeof(meta));
 	mkga_copy_string(meta.image, sizeof(meta.image), req->image);
+	meta.argv_count = req->argv_count;
+	for (uint32_t i = 0; i < req->argv_count; i++) {
+		mkga_copy_string(meta.argv[i], sizeof(meta.argv[i]), req->argv[i]);
+	}
 	mkga_containerd_fill_state(&state, MKGA_CONTAINER_STATE_CREATED, 0, 0, 0, 0, "");
 
 	if (!impl->start_via_run) {
@@ -1772,6 +1852,12 @@ static int mkga_containerd_create_container(struct mkga_runtime *runtime,
 		argv[argc++] = "create";
 		argv[argc++] = (char *)req->image;
 		argv[argc++] = container_id;
+		argc = mkga_containerd_append_exec_argv(argv, argc, MKGA_CONTAINERD_ARGV_MAX,
+					       req->argv_count,
+					       (char (*)[MKGA_MAX_ARG_LEN])req->argv);
+		if (argc < 0) {
+			return argc;
+		}
 		argv[argc] = NULL;
 
 		rc = mkga_ctr_exec(impl, argv, impl->default_timeout_ms,
@@ -1839,7 +1925,8 @@ static int mkga_containerd_start_container(struct mkga_runtime *runtime,
 		if (rc != 0) {
 			return rc;
 		}
-		return mkga_containerd_spawn_log_runner(impl, req->container_id, meta.image);
+		return mkga_containerd_spawn_log_runner(impl, req->container_id, meta.image,
+							meta.argv_count, meta.argv);
 	}
 
 	memset(argv, 0, sizeof(argv));

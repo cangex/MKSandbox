@@ -9,6 +9,8 @@ type ContainerSpec struct {
 	PodID       string
 	Name        string
 	Image       string
+	Command     []string
+	Args        []string
 	Labels      map[string]string
 	Annotations map[string]string
 	LogPath     string

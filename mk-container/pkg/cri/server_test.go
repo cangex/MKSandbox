@@ -29,13 +29,15 @@ func (m *countingKernelManager) StopKernel(_ context.Context, _ string) error {
 
 type countingClient struct {
 	readLogCalls int
+	lastCreate   agent.ContainerSpec
 }
 
 func (c *countingClient) WaitReady(_ context.Context) error {
 	return nil
 }
 
-func (c *countingClient) CreateContainer(_ context.Context, _ agent.ContainerSpec) (string, string, error) {
+func (c *countingClient) CreateContainer(_ context.Context, spec agent.ContainerSpec) (string, string, error) {
+	c.lastCreate = spec
 	return "ctr-test", "", nil
 }
 
@@ -129,5 +131,54 @@ func TestContainerQueriesDoNotSyncLogs(t *testing.T) {
 
 	if client.readLogCalls != 0 {
 		t.Fatalf("expected container queries to avoid log sync, got %d ReadLog calls", client.readLogCalls)
+	}
+}
+
+func TestCreateContainerPassesCommandAndArgs(t *testing.T) {
+	client := &countingClient{}
+	server := newCRITestServer(t, client)
+	ctx := context.Background()
+
+	runResp, err := server.RunPodSandbox(ctx, &runtimeapi.RunPodSandboxRequest{
+		Config: &runtimeapi.PodSandboxConfig{
+			Metadata: &runtimeapi.PodSandboxMetadata{
+				Name:      "p",
+				Namespace: "default",
+				Uid:       "u2",
+				Attempt:   1,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("run pod sandbox: %v", err)
+	}
+
+	_, err = server.CreateContainer(ctx, &runtimeapi.CreateContainerRequest{
+		PodSandboxId: runResp.PodSandboxId,
+		Config: &runtimeapi.ContainerConfig{
+			Metadata: &runtimeapi.ContainerMetadata{
+				Name:    "logger",
+				Attempt: 1,
+			},
+			Image:   &runtimeapi.ImageSpec{Image: "busybox"},
+			Command: []string{"sh", "-c"},
+			Args:    []string{"while true; do echo tick; sleep 1; done"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+
+	if got, want := len(client.lastCreate.Command), 2; got != want {
+		t.Fatalf("unexpected command length: got=%d want=%d", got, want)
+	}
+	if client.lastCreate.Command[0] != "sh" || client.lastCreate.Command[1] != "-c" {
+		t.Fatalf("unexpected command: %#v", client.lastCreate.Command)
+	}
+	if got, want := len(client.lastCreate.Args), 1; got != want {
+		t.Fatalf("unexpected args length: got=%d want=%d", got, want)
+	}
+	if client.lastCreate.Args[0] != "while true; do echo tick; sleep 1; done" {
+		t.Fatalf("unexpected args: %#v", client.lastCreate.Args)
 	}
 }

@@ -14,6 +14,8 @@
 #define MKGA_MAX_NAME_LEN 64
 #define MKGA_MAX_IMAGE_LEN 256
 #define MKGA_MAX_LOG_PATH_LEN 256
+#define MKGA_MAX_ARGV 4
+#define MKGA_MAX_ARG_LEN 64
 #define MKGA_MAX_KV_PAIRS 8
 #define MKGA_MAX_KV_KEY_LEN 64
 #define MKGA_MAX_KV_VALUE_LEN 256
@@ -58,6 +60,8 @@ struct mkga_create_container_req {
 	char name[MKGA_MAX_NAME_LEN];
 	char image[MKGA_MAX_IMAGE_LEN];
 	char log_path[MKGA_MAX_LOG_PATH_LEN];
+	uint32_t argv_count;
+	char argv[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN];
 	size_t label_count;
 	struct mkga_kv_pair labels[MKGA_MAX_KV_PAIRS];
 	size_t annotation_count;

@@ -38,17 +38,19 @@ const (
 	mkringContainerMaxName        = 64
 	mkringContainerMaxImage       = 256
 	mkringContainerMaxLogPath     = 256
+	mkringContainerMaxArgv        = 4
+	mkringContainerMaxArgLen      = 64
 	mkringContainerMaxContainerID = 64
 	mkringContainerMaxImageRef    = 256
 	mkringContainerMaxErrorMsg    = 128
 	mkringContainerMaxLogChunk    = 384
 
 	containerHeaderSize          = 28
-	containerPayloadSize         = 704
-	containerMessageSize         = 732
+	containerPayloadSize         = 968
+	containerMessageSize         = 996
 	containerWaitReadySize       = 12
-	containerCallSize            = 1476
-	containerCreateRequestSize   = 704
+	containerCallSize            = 2004
+	containerCreateRequestSize   = 968
 	containerControlRequestSize  = 136
 	containerReadLogRequestSize  = 140
 	containerCreateResponseSize  = 320
@@ -131,11 +133,14 @@ type containerCall struct {
 }
 
 type containerCreateRequest struct {
-	KernelID [mkringContainerMaxKernelID]byte
-	PodID    [mkringContainerMaxPodID]byte
-	Name     [mkringContainerMaxName]byte
-	Image    [mkringContainerMaxImage]byte
-	LogPath  [mkringContainerMaxLogPath]byte
+	KernelID  [mkringContainerMaxKernelID]byte
+	PodID     [mkringContainerMaxPodID]byte
+	Name      [mkringContainerMaxName]byte
+	Image     [mkringContainerMaxImage]byte
+	LogPath   [mkringContainerMaxLogPath]byte
+	ArgvCount uint32
+	Reserved0 uint32
+	Argv      [mkringContainerMaxArgv][mkringContainerMaxArgLen]byte
 }
 
 type containerControlRequest struct {
@@ -357,6 +362,10 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 		if err := protocol.DecodePayload(req, &payload); err != nil {
 			return containerMessage{}, err
 		}
+		argv := flattenArgv(payload.Command, payload.Args)
+		if len(argv) > mkringContainerMaxArgv {
+			return containerMessage{}, fmt.Errorf("argv length %d exceeds max %d", len(argv), mkringContainerMaxArgv)
+		}
 		create := containerCreateRequest{}
 		if err := copyCString(create.KernelID[:], payload.KernelID); err != nil {
 			return containerMessage{}, err
@@ -372,6 +381,12 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 		}
 		if err := copyCString(create.LogPath[:], payload.LogPath); err != nil {
 			return containerMessage{}, err
+		}
+		create.ArgvCount = uint32(len(argv))
+		for i, arg := range argv {
+			if err := copyCString(create.Argv[i][:], arg); err != nil {
+				return containerMessage{}, err
+			}
 		}
 		encoded, err := encodeStruct(create, containerCreateRequestSize)
 		if err != nil {
@@ -423,6 +438,17 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 	}
 
 	return msg, nil
+}
+
+func flattenArgv(command []string, args []string) []string {
+	if len(command) == 0 && len(args) == 0 {
+		return nil
+	}
+
+	argv := make([]string, 0, len(command)+len(args))
+	argv = append(argv, command...)
+	argv = append(argv, args...)
+	return argv
 }
 
 func decodeResponseEnvelope(req protocol.Envelope, call containerCall) (protocol.Envelope, error) {

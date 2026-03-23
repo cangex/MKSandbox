@@ -202,6 +202,18 @@ static int mkga_decode_request_packet(const struct mkring_container_packet *pack
 			sizeof(req->payload.create_container_req.log_path),
 			packet->msg.payload.create_req.log_path,
 			sizeof(packet->msg.payload.create_req.log_path));
+		req->payload.create_container_req.argv_count =
+			packet->msg.payload.create_req.argv_count;
+		if (req->payload.create_container_req.argv_count > MKGA_MAX_ARGV) {
+			return -EINVAL;
+		}
+		for (size_t i = 0; i < req->payload.create_container_req.argv_count; i++) {
+			mkga_copy_bounded_string(
+				req->payload.create_container_req.argv[i],
+				sizeof(req->payload.create_container_req.argv[i]),
+				packet->msg.payload.create_req.argv[i],
+				sizeof(packet->msg.payload.create_req.argv[i]));
+		}
 		return 0;
 
 	case MKGA_OP_READ_LOG:

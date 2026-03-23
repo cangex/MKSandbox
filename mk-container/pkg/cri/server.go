@@ -213,6 +213,8 @@ func (s *Server) CreateContainer(ctx context.Context, req *runtimeapi.CreateCont
 		Name:        cfg.GetMetadata().GetName(),
 		Attempt:     cfg.GetMetadata().GetAttempt(),
 		Image:       cfg.GetImage().GetImage(),
+		Command:     append([]string(nil), cfg.GetCommand()...),
+		Args:        append([]string(nil), cfg.GetArgs()...),
 		Labels:      cfg.GetLabels(),
 		Annotations: cfg.GetAnnotations(),
 		LogPath:     resolveContainerLogPath(cfg.GetLogPath(), req.GetSandboxConfig()),

@@ -33,6 +33,8 @@
 #define MKRING_CONTAINER_MAX_NAME                64U
 #define MKRING_CONTAINER_MAX_IMAGE               256U
 #define MKRING_CONTAINER_MAX_LOG_PATH            256U
+#define MKRING_CONTAINER_MAX_ARGV                4U
+#define MKRING_CONTAINER_MAX_ARG_LEN             64U
 #define MKRING_CONTAINER_MAX_CONTAINER_ID        64U
 #define MKRING_CONTAINER_MAX_IMAGE_REF           256U
 #define MKRING_CONTAINER_MAX_ERROR_MSG           128U
@@ -62,6 +64,9 @@ struct mkring_container_create_request {
 	char name[MKRING_CONTAINER_MAX_NAME];
 	char image[MKRING_CONTAINER_MAX_IMAGE];
 	char log_path[MKRING_CONTAINER_MAX_LOG_PATH];
+	uint32_t argv_count;
+	uint32_t reserved0;
+	char argv[MKRING_CONTAINER_MAX_ARGV][MKRING_CONTAINER_MAX_ARG_LEN];
 } __attribute__((packed));
 
 struct mkring_container_control_request {

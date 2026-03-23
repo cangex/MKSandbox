@@ -29,6 +29,8 @@ type ContainerSpec struct {
 	Name        string
 	Attempt     uint32
 	Image       string
+	Command     []string
+	Args        []string
 	Labels      map[string]string
 	Annotations map[string]string
 	LogPath     string
@@ -82,6 +84,15 @@ func copyMap(in map[string]string) map[string]string {
 	for k, v := range in {
 		out[k] = v
 	}
+	return out
+}
+
+func copySlice(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
 	return out
 }
 
@@ -410,6 +421,8 @@ func (e *Engine) CreateContainer(ctx context.Context, spec ContainerSpec) (*mode
 		PodID:       spec.PodID,
 		Name:        spec.Name,
 		Image:       spec.Image,
+		Command:     copySlice(spec.Command),
+		Args:        copySlice(spec.Args),
 		Labels:      copyMap(spec.Labels),
 		Annotations: copyMap(spec.Annotations),
 		LogPath:     spec.LogPath,

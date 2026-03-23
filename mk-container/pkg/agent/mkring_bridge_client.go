@@ -43,6 +43,8 @@ type bridgeCreateContainerRequest struct {
 	PodID       string            `json:"pod_id"`
 	Name        string            `json:"name"`
 	Image       string            `json:"image"`
+	Command     []string          `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	LogPath     string            `json:"log_path,omitempty"`
@@ -269,6 +271,8 @@ func (c *mkringBridgeClient) CreateContainer(ctx context.Context, spec Container
 		PodID:       spec.PodID,
 		Name:        spec.Name,
 		Image:       spec.Image,
+		Command:     spec.Command,
+		Args:        spec.Args,
 		Labels:      spec.Labels,
 		Annotations: spec.Annotations,
 		LogPath:     spec.LogPath,
