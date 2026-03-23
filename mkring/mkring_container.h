@@ -18,13 +18,15 @@ typedef uint64_t __u64;
 typedef int64_t __s64;
 #endif
 
-#define MKRING_CONTAINER_MAGIC			0x4d4b434eU
-#define MKRING_CONTAINER_VERSION		1U
-#define MKRING_CONTAINER_CHANNEL		1U
+#include "mkring_proto.h"
 
-#define MKRING_CONTAINER_KIND_READY		1U
-#define MKRING_CONTAINER_KIND_REQUEST		2U
-#define MKRING_CONTAINER_KIND_RESPONSE		3U
+#define MKRING_CONTAINER_MAGIC			MKRING_PROTO_MAGIC
+#define MKRING_CONTAINER_VERSION		MKRING_PROTO_VERSION
+#define MKRING_CONTAINER_CHANNEL		MKRING_CHANNEL_CONTAINER
+
+#define MKRING_CONTAINER_KIND_READY		MKRING_PROTO_KIND_READY
+#define MKRING_CONTAINER_KIND_REQUEST		MKRING_PROTO_KIND_REQUEST
+#define MKRING_CONTAINER_KIND_RESPONSE		MKRING_PROTO_KIND_RESPONSE
 
 #define MKRING_CONTAINER_OP_NONE		0U
 #define MKRING_CONTAINER_OP_CREATE		1U
@@ -51,19 +53,6 @@ typedef int64_t __s64;
 #define MKRING_CONTAINER_MAX_IMAGE_REF		256U
 #define MKRING_CONTAINER_MAX_ERROR_MSG		128U
 #define MKRING_CONTAINER_MAX_LOG_CHUNK		384U
-
-struct mkring_container_header {
-	__u32 magic;
-	__u8 version;
-	__u8 channel;
-	__u8 kind;
-	__u8 operation;
-	__u16 flags;
-	__u16 reserved0;
-	__u64 request_id;
-	__s32 status;
-	__u32 payload_len;
-} __attribute__((packed));
 
 struct mkring_container_ready_payload {
 	__u32 features;
@@ -135,7 +124,7 @@ union mkring_container_payload {
 } __attribute__((packed));
 
 struct mkring_container_message {
-	struct mkring_container_header hdr;
+	struct mkring_proto_header hdr;
 	union mkring_container_payload payload;
 } __attribute__((packed));
 

@@ -17,6 +17,8 @@
 #include <linux/wait.h>
 
 #include "mkring.h"
+#include "mkring_demux.h"
+#include "mkring_proto.h"
 #include "mkring_container.h"
 
 #define MKRC_NAME			"mkring-container-bridge"
@@ -47,7 +49,6 @@ struct mkrc_ctx {
 	enum mkrc_role role;
 	char device_name[64];
 	struct mkring_info info;
-	bool rx_registered[MKRING_MAX_KERNELS];
 	bool peer_ready[MKRING_MAX_KERNELS];
 	bool stopping;
 
@@ -210,6 +211,19 @@ static bool mkrc_message_is_valid(const struct mkring_container_message *msg,
 	return msg->hdr.payload_len == mkrc_payload_len_for_message(msg);
 }
 
+static bool mkrc_demux_validate(const void *data, u32 len, void *priv)
+{
+	const struct mkrc_ctx *ctx = priv;
+	const struct mkring_container_message *msg = data;
+
+	if (!ctx || !msg)
+		return false;
+	if (len != sizeof(*msg))
+		return false;
+
+	return mkrc_message_is_valid(msg, len);
+}
+
 static int mkrc_send_packet(struct mkrc_ctx *ctx, u16 peer_kernel_id,
 			    struct mkring_container_message *msg)
 {
@@ -366,7 +380,7 @@ static int mkrc_worker_thread(void *arg)
 	return 0;
 }
 
-static void mkrc_rx_cb(u16 src_kid, const void *data, u32 len, void *priv)
+static void mkrc_demux_rx(u16 src_kid, const void *data, u32 len, void *priv)
 {
 	struct mkrc_ctx *ctx = priv;
 	struct mkrc_msg_node *node;
@@ -375,13 +389,6 @@ static void mkrc_rx_cb(u16 src_kid, const void *data, u32 len, void *priv)
 	if (!ctx || !mkrc_valid_peer(ctx, src_kid) || !data) {
 		if (ctx)
 			atomic64_inc(&ctx->rx_bad);
-		return;
-	}
-
-	if (!mkrc_message_is_valid(data, len)) {
-		atomic64_inc(&ctx->rx_bad);
-		pr_warn_ratelimited("%s: invalid container message from peer=%u len=%u\n",
-				    MKRC_NAME, src_kid, len);
 		return;
 	}
 
@@ -406,6 +413,11 @@ static void mkrc_rx_cb(u16 src_kid, const void *data, u32 len, void *priv)
 	atomic64_inc(&ctx->rx_ok);
 	wake_up_interruptible(&ctx->work_wq);
 }
+
+static const struct mkring_demux_ops mkrc_demux_ops = {
+	.validate = mkrc_demux_validate,
+	.rx = mkrc_demux_rx,
+};
 
 static struct mkrc_msg_node *mkrc_pop_guest_request(struct mkrc_ctx *ctx)
 {
@@ -749,7 +761,6 @@ static void mkrc_report(const struct mkrc_ctx *ctx, const char *tag)
 
 static int __init mkrc_init(void)
 {
-	u16 peer;
 	int ret;
 
 	memset(&mkrc, 0, sizeof(mkrc));
@@ -795,17 +806,12 @@ static int __init mkrc_init(void)
 	init_waitqueue_head(&mkrc.ready_wq);
 	atomic64_set(&mkrc.next_request_id, 1);
 
-	for (peer = 0; peer < mkrc.info.kernels; peer++) {
-		if (peer == mkrc.info.local_id)
-			continue;
-
-		ret = mkring_register_rx_cb(peer, mkrc_rx_cb, &mkrc);
-		if (ret) {
-			pr_err("%s: mkring_register_rx_cb(peer=%u) failed: %d\n",
-			       MKRC_NAME, peer, ret);
-			goto err_unregister;
-		}
-		mkrc.rx_registered[peer] = true;
+	ret = mkring_demux_register_channel(MKRING_CHANNEL_CONTAINER,
+					    &mkrc_demux_ops, &mkrc);
+	if (ret) {
+		pr_err("%s: mkring_demux_register_channel(container) failed: %d\n",
+		       MKRC_NAME, ret);
+		goto err_out;
 	}
 
 	mkrc.worker = kthread_run(mkrc_worker_thread, &mkrc, "mkrc-worker");
@@ -813,7 +819,7 @@ static int __init mkrc_init(void)
 		ret = PTR_ERR(mkrc.worker);
 		mkrc.worker = NULL;
 		pr_err("%s: failed to start worker: %d\n", MKRC_NAME, ret);
-		goto err_unregister;
+		goto err_unreg_channel;
 	}
 
 	mkrc.miscdev.minor = MISC_DYNAMIC_MINOR;
@@ -842,13 +848,9 @@ err_worker:
 		kthread_stop(mkrc.worker);
 		mkrc.worker = NULL;
 	}
-err_unregister:
-	for (peer = 0; peer < mkrc.info.kernels; peer++) {
-		if (!mkrc.rx_registered[peer])
-			continue;
-		mkring_unregister_rx_cb(peer);
-		mkrc.rx_registered[peer] = false;
-	}
+err_unreg_channel:
+	mkring_demux_unregister_channel(MKRING_CHANNEL_CONTAINER);
+err_out:
 	mkrc_flush_work_queue(&mkrc);
 	mkrc_flush_guest_queue(&mkrc);
 	return ret;
@@ -856,8 +858,6 @@ err_unregister:
 
 static void __exit mkrc_exit(void)
 {
-	u16 peer;
-
 	mkrc.stopping = true;
 	wake_up_interruptible(&mkrc.work_wq);
 	wake_up_interruptible(&mkrc.guest_wq);
@@ -872,12 +872,7 @@ static void __exit mkrc_exit(void)
 
 	misc_deregister(&mkrc.miscdev);
 
-	for (peer = 0; peer < mkrc.info.kernels; peer++) {
-		if (!mkrc.rx_registered[peer])
-			continue;
-		mkring_unregister_rx_cb(peer);
-		mkrc.rx_registered[peer] = false;
-	}
+	mkring_demux_unregister_channel(MKRING_CHANNEL_CONTAINER);
 
 	mkrc_flush_work_queue(&mkrc);
 	mkrc_flush_guest_queue(&mkrc);
