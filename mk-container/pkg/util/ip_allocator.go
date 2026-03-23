@@ -11,6 +11,8 @@ type IPAllocator struct {
 	mu      sync.Mutex
 	network *net.IPNet
 	next    uint32
+	free    []uint32
+	used    map[uint32]struct{}
 }
 
 func ipToUint32(ip net.IP) uint32 {
@@ -37,6 +39,7 @@ func NewIPAllocator(baseIP string, mask int) (*IPAllocator, error) {
 	return &IPAllocator{
 		network: network,
 		next:    2,
+		used:    map[uint32]struct{}{},
 	}, nil
 }
 
@@ -44,6 +47,13 @@ func NewIPAllocator(baseIP string, mask int) (*IPAllocator, error) {
 func (a *IPAllocator) Allocate() (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+
+	if n := len(a.free); n > 0 {
+		offset := a.free[n-1]
+		a.free = a.free[:n-1]
+		a.used[offset] = struct{}{}
+		return uint32ToIP(ipToUint32(a.network.IP) + offset).String(), nil
+	}
 
 	base := ipToUint32(a.network.IP)
 	ones, bits := a.network.Mask.Size()
@@ -55,6 +65,40 @@ func (a *IPAllocator) Allocate() (string, error) {
 	}
 
 	ip := uint32ToIP(base + a.next)
+	a.used[a.next] = struct{}{}
 	a.next++
 	return ip.String(), nil
+}
+
+// Release returns an allocated pod IP back to the allocator.
+func (a *IPAllocator) Release(ip string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return
+	}
+
+	ipv4 := parsed.To4()
+	if ipv4 == nil || !a.network.Contains(ipv4) {
+		return
+	}
+
+	base := ipToUint32(a.network.IP)
+	offset := ipToUint32(ipv4) - base
+
+	ones, bits := a.network.Mask.Size()
+	hostBits := bits - ones
+	maxHosts := uint32(1 << hostBits)
+
+	if offset < 2 || offset >= maxHosts-1 {
+		return
+	}
+	if _, ok := a.used[offset]; !ok {
+		return
+	}
+
+	delete(a.used, offset)
+	a.free = append(a.free, offset)
 }

@@ -260,7 +260,6 @@ func (s *Server) ListContainers(ctx context.Context, req *runtimeapi.ListContain
 		if ctr == nil {
 			continue
 		}
-		_ = s.engine.SyncContainerLogs(ctx, ctr.ID)
 		if refreshed, err := s.engine.RefreshContainerStatus(ctx, ctr.ID); err == nil && refreshed != nil {
 			*ctr = *refreshed
 		}
@@ -316,7 +315,6 @@ func (s *Server) ContainerStatus(ctx context.Context, req *runtimeapi.ContainerS
 			return nil, status.Errorf(codes.NotFound, "container %s not found", req.GetContainerId())
 		}
 	}
-	_ = s.engine.SyncContainerLogs(ctx, req.GetContainerId())
 
 	statusBody := &runtimeapi.ContainerStatus{
 		Id: ctr.ID,

@@ -41,6 +41,8 @@ type Engine struct {
 	pods           map[string]*model.Pod
 	containers     map[string]*model.Container
 	podToContainer map[string]string
+	podCleanup     map[string]struct{}
+	podCleanupCond *sync.Cond
 	logSync        map[string]*containerLogSync
 	monitors       map[string]context.CancelFunc
 	kernelManager  kernel.Manager
@@ -55,11 +57,12 @@ type containerLogSync struct {
 }
 
 func NewEngine(km kernel.Manager, af agent.Factory, allocator *util.IPAllocator, kernelIDAlloc *util.IntAllocator) *Engine {
-	return &Engine{
+	e := &Engine{
 		kernels:        map[string]*model.Kernel{},
 		pods:           map[string]*model.Pod{},
 		containers:     map[string]*model.Container{},
 		podToContainer: map[string]string{},
+		podCleanup:     map[string]struct{}{},
 		logSync:        map[string]*containerLogSync{},
 		monitors:       map[string]context.CancelFunc{},
 		kernelManager:  km,
@@ -67,6 +70,8 @@ func NewEngine(km kernel.Manager, af agent.Factory, allocator *util.IPAllocator,
 		podIPAllocator: allocator,
 		kernelIDAlloc:  kernelIDAlloc,
 	}
+	e.podCleanupCond = sync.NewCond(&e.mu)
+	return e
 }
 
 func copyMap(in map[string]string) map[string]string {
@@ -78,6 +83,24 @@ func copyMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func (e *Engine) waitForPodCleanupLocked(podID string) {
+	for {
+		if _, busy := e.podCleanup[podID]; !busy {
+			return
+		}
+		e.podCleanupCond.Wait()
+	}
+}
+
+func (e *Engine) beginPodCleanupLocked(podID string) {
+	e.podCleanup[podID] = struct{}{}
+}
+
+func (e *Engine) endPodCleanupLocked(podID string) {
+	delete(e.podCleanup, podID)
+	e.podCleanupCond.Broadcast()
 }
 
 func (e *Engine) syncLogState(containerID string) *containerLogSync {
@@ -137,15 +160,36 @@ func (e *Engine) syncContainerOnce(ctx context.Context, containerID string) bool
 	return state == model.ContainerStateExited && e.logEOF(containerID)
 }
 
+func (e *Engine) cleanupExitedContainer(ctx context.Context, containerID string) bool {
+	e.mu.RLock()
+	ctr, ok := e.containers[containerID]
+	if !ok {
+		e.mu.RUnlock()
+		return true
+	}
+	podID := ctr.PodID
+	e.mu.RUnlock()
+
+	if err := e.StopPod(ctx, podID); err != nil {
+		if _, ok := e.GetContainer(containerID); !ok {
+			return true
+		}
+		return false
+	}
+	return true
+}
+
 func (e *Engine) monitorContainer(ctx context.Context, containerID string) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	if e.syncContainerOnce(ctx, containerID) {
-		e.mu.Lock()
-		delete(e.monitors, containerID)
-		e.mu.Unlock()
-		return
+		if e.cleanupExitedContainer(ctx, containerID) {
+			e.mu.Lock()
+			delete(e.monitors, containerID)
+			e.mu.Unlock()
+			return
+		}
 	}
 
 	for {
@@ -154,10 +198,12 @@ func (e *Engine) monitorContainer(ctx context.Context, containerID string) {
 			return
 		case <-ticker.C:
 			if e.syncContainerOnce(ctx, containerID) {
-				e.mu.Lock()
-				delete(e.monitors, containerID)
-				e.mu.Unlock()
-				return
+				if e.cleanupExitedContainer(ctx, containerID) {
+					e.mu.Lock()
+					delete(e.monitors, containerID)
+					e.mu.Unlock()
+					return
+				}
 			}
 		}
 	}
@@ -173,7 +219,7 @@ func (e *Engine) startContainerMonitor(containerID string) {
 	go e.monitorContainer(ctx, containerID)
 }
 
-func (e *Engine) RunPod(ctx context.Context, spec PodSpec) (*model.Pod, error) {
+func (e *Engine) RunPod(ctx context.Context, spec PodSpec) (_ *model.Pod, err error) {
 	podID := util.NewID()
 	kernelID := util.NewID()
 	peerKernelID, err := e.kernelIDAlloc.Allocate()
@@ -205,6 +251,11 @@ func (e *Engine) RunPod(ctx context.Context, spec PodSpec) (*model.Pod, error) {
 		e.kernelIDAlloc.Release(peerKernelID)
 		return nil, err
 	}
+	defer func() {
+		if err != nil {
+			e.podIPAllocator.Release(ip)
+		}
+	}()
 
 	now := time.Now().UTC()
 	pod := &model.Pod{
@@ -237,10 +288,11 @@ func (e *Engine) RunPod(ctx context.Context, spec PodSpec) (*model.Pod, error) {
 }
 
 func (e *Engine) StopPod(ctx context.Context, podID string) error {
-	e.mu.RLock()
+	e.mu.Lock()
+	e.waitForPodCleanupLocked(podID)
 	pod, ok := e.pods[podID]
 	if !ok {
-		e.mu.RUnlock()
+		e.mu.Unlock()
 		return nil
 	}
 	containerID, hasContainer := e.podToContainer[podID]
@@ -248,8 +300,20 @@ func (e *Engine) StopPod(ctx context.Context, podID string) error {
 	if hasContainer {
 		ctr = e.containers[containerID]
 	}
-	kernelObj := e.kernels[pod.KernelID]
-	e.mu.RUnlock()
+	kernelID := pod.KernelID
+	podIP := pod.IP
+	shouldStopKernel := e.kernels[kernelID] != nil
+	if !shouldStopKernel && pod.State == model.PodStateNotReady && podIP == "" {
+		e.mu.Unlock()
+		return nil
+	}
+	e.beginPodCleanupLocked(podID)
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.endPodCleanupLocked(podID)
+		e.mu.Unlock()
+	}()
 
 	if ctr != nil && ctr.State == model.ContainerStateRunning {
 		if err := e.StopContainer(ctx, ctr.ID, 10*time.Second); err != nil {
@@ -257,31 +321,47 @@ func (e *Engine) StopPod(ctx context.Context, podID string) error {
 		}
 	}
 
-	if err := e.kernelManager.StopKernel(ctx, pod.KernelID); err != nil {
-		return err
+	if shouldStopKernel {
+		if err := e.kernelManager.StopKernel(ctx, kernelID); err != nil {
+			return err
+		}
 	}
 
 	e.mu.Lock()
 	if p := e.pods[podID]; p != nil {
 		p.State = model.PodStateNotReady
+		p.IP = ""
 	}
-	if kernelObj != nil {
+	if kernelObj := e.kernels[kernelID]; kernelObj != nil {
 		delete(e.kernels, kernelObj.ID)
 		e.kernelIDAlloc.Release(int(kernelObj.PeerKernelID))
 	}
 	e.mu.Unlock()
+	if podIP != "" {
+		e.podIPAllocator.Release(podIP)
+	}
 	return nil
 }
 
 func (e *Engine) RemovePod(ctx context.Context, podID string) error {
-	e.mu.RLock()
+	e.mu.Lock()
+	e.waitForPodCleanupLocked(podID)
 	pod, ok := e.pods[podID]
 	if !ok {
-		e.mu.RUnlock()
+		e.mu.Unlock()
 		return nil
 	}
 	containerID, hasContainer := e.podToContainer[podID]
-	e.mu.RUnlock()
+	kernelID := pod.KernelID
+	podIP := pod.IP
+	shouldStopKernel := e.kernels[kernelID] != nil
+	e.beginPodCleanupLocked(podID)
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.endPodCleanupLocked(podID)
+		e.mu.Unlock()
+	}()
 
 	if hasContainer {
 		if err := e.RemoveContainer(ctx, containerID); err != nil {
@@ -289,16 +369,21 @@ func (e *Engine) RemovePod(ctx context.Context, podID string) error {
 		}
 	}
 
-	_ = e.kernelManager.StopKernel(ctx, pod.KernelID)
+	if shouldStopKernel {
+		_ = e.kernelManager.StopKernel(ctx, kernelID)
+	}
 
 	e.mu.Lock()
-	if kernelObj := e.kernels[pod.KernelID]; kernelObj != nil {
-		delete(e.kernels, pod.KernelID)
+	if kernelObj := e.kernels[kernelID]; kernelObj != nil {
+		delete(e.kernels, kernelID)
 		e.kernelIDAlloc.Release(int(kernelObj.PeerKernelID))
 	}
 	delete(e.podToContainer, podID)
 	delete(e.pods, podID)
 	e.mu.Unlock()
+	if podIP != "" {
+		e.podIPAllocator.Release(podIP)
+	}
 	return nil
 }
 
