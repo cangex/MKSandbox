@@ -17,6 +17,24 @@ This tree now supports an `mkring`-based control chain:
   - a runnable mock backend,
   - an `mkring` bridge client backend for host-side control forwarding.
 - Pod IP allocation (for CNI handoff and status report).
+- `command/args` passthrough from CRI to the guest `ctr` invocation.
+- Host-side monitor loop for:
+  - long-running container status refresh,
+  - guest `.cri.log` -> host `LogPath` sync,
+  - pod-level auto cleanup after `EXITED && log EOF`.
+- Manual `StopContainer` support without racing monitor-driven auto cleanup.
+
+## Current boundaries
+
+- Sub-kernel shutdown works for pod cleanup, but multikernel resource reuse is
+  not complete yet.
+- In particular, CPU reclaim, instance teardown, kimage cleanup, and other
+  host-side kernel resource reuse semantics are still under active development.
+- Interactive container workflows are not implemented yet:
+  - no `ExecSync`,
+  - no `Exec`,
+  - no `Attach`,
+  - no TTY/stdin streaming path.
 
 ## Repo layout
 
@@ -58,6 +76,16 @@ When `MK_CONTROL_TRANSPORT=mkring`, `mkcri` allocates a numeric peer-kernel-id
 for each sub-kernel and exports it to start/stop commands as
 `MK_KERNEL_PEER_ID`. Boot scripts should wire that value to the guest kernel's
 `mkring.kernel_id`.
+
+## Next steps
+
+1. Finish mature sub-kernel shutdown and kernel resource reuse.
+2. Add interactive container support:
+   - CRI `ExecSync`
+   - CRI `Exec`
+   - CRI `Attach`
+   - TTY/stdin/stdout/stderr streaming
+3. Continue hardening long-running container and cleanup behavior.
 
 ## Kubelet integration (example)
 
