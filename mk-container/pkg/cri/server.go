@@ -23,6 +23,8 @@ type Server struct {
 	engine         *mkrt.Engine
 }
 
+const defaultStopContainerTimeout = 30 * time.Second
+
 func NewServer(engine *mkrt.Engine, runtimeName, runtimeVersion string) *Server {
 	return &Server{
 		runtimeName:    runtimeName,
@@ -240,7 +242,11 @@ func (s *Server) StopContainer(ctx context.Context, req *runtimeapi.StopContaine
 	if req.GetContainerId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "containerId is required")
 	}
-	if err := s.engine.StopContainer(ctx, req.GetContainerId(), time.Duration(req.GetTimeout())*time.Second); err != nil {
+	timeout := time.Duration(req.GetTimeout()) * time.Second
+	if timeout <= 0 {
+		timeout = defaultStopContainerTimeout
+	}
+	if err := s.engine.StopContainer(ctx, req.GetContainerId(), timeout); err != nil {
 		return nil, status.Errorf(codes.Internal, "stop container failed: %v", err)
 	}
 	return &runtimeapi.StopContainerResponse{}, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,6 +48,12 @@ type readyClient struct {
 	containers map[string]struct{}
 	status     *agent.ContainerStatus
 	logChunk   *agent.LogChunk
+	stopErr    error
+	stopCode   int32
+	stopStart  chan struct{}
+	stopBlock  chan struct{}
+	mu         sync.Mutex
+	stopped    bool
 }
 
 func (c *readyClient) WaitReady(_ context.Context) error {
@@ -68,7 +75,22 @@ func (c *readyClient) StartContainer(_ context.Context, _ string) error {
 }
 
 func (c *readyClient) StopContainer(_ context.Context, _ string, _ time.Duration) (int32, error) {
-	return 0, nil
+	if c.stopStart != nil {
+		select {
+		case c.stopStart <- struct{}{}:
+		default:
+		}
+	}
+	c.mu.Lock()
+	c.stopped = true
+	c.mu.Unlock()
+	if c.stopBlock != nil {
+		<-c.stopBlock
+	}
+	if c.stopErr != nil {
+		return 0, c.stopErr
+	}
+	return c.stopCode, nil
 }
 
 func (c *readyClient) RemoveContainer(_ context.Context, _ string) error {
@@ -76,6 +98,16 @@ func (c *readyClient) RemoveContainer(_ context.Context, _ string) error {
 }
 
 func (c *readyClient) ContainerStatus(_ context.Context, _ string) (*agent.ContainerStatus, error) {
+	c.mu.Lock()
+	stopped := c.stopped
+	c.mu.Unlock()
+	if stopped {
+		return &agent.ContainerStatus{
+			State:      "EXITED",
+			ExitCode:   c.stopCode,
+			FinishedAt: time.Now().UTC(),
+		}, nil
+	}
 	if c.status != nil {
 		cp := *c.status
 		return &cp, nil
@@ -84,6 +116,12 @@ func (c *readyClient) ContainerStatus(_ context.Context, _ string) (*agent.Conta
 }
 
 func (c *readyClient) ReadLog(_ context.Context, _ string, offset uint64, _ int) (*agent.LogChunk, error) {
+	c.mu.Lock()
+	stopped := c.stopped
+	c.mu.Unlock()
+	if stopped {
+		return &agent.LogChunk{NextOffset: offset, EOF: true}, nil
+	}
 	if c.logChunk != nil {
 		cp := *c.logChunk
 		return &cp, nil
@@ -435,4 +473,61 @@ func TestRemovePodWaitsForAutoCleanup(t *testing.T) {
 	if _, ok := e.GetPod(pod.ID); ok {
 		t.Fatalf("expected pod to be removed after RemovePod wins cleanup tail")
 	}
+}
+
+func TestStopContainerBlocksAutoCleanupUntilStopReturns(t *testing.T) {
+	client := &readyClient{
+		stopStart: make(chan struct{}, 1),
+		stopBlock: make(chan struct{}),
+	}
+	e, km, _ := newTestEngineWithFactory(t, &readyFactory{client: client})
+	ctx := context.Background()
+
+	pod, err := e.RunPod(ctx, PodSpec{Name: "p1", Namespace: "default", UID: "u1"})
+	if err != nil {
+		t.Fatalf("run pod: %v", err)
+	}
+	ctr, err := e.CreateContainer(ctx, ContainerSpec{
+		PodID:   pod.ID,
+		Name:    "c1",
+		Image:   "busybox",
+		LogPath: filepath.Join(t.TempDir(), "ctr.log"),
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	if err := e.StartContainer(ctx, ctr.ID); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- e.StopContainer(ctx, ctr.ID, 2*time.Second)
+	}()
+
+	select {
+	case <-client.stopStart:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for StopContainer to reach agent")
+	}
+
+	time.Sleep(700 * time.Millisecond)
+	if len(km.stopCalls) != 0 {
+		t.Fatalf("expected auto cleanup to stay blocked while StopContainer is in flight, got %d stop kernel calls", len(km.stopCalls))
+	}
+
+	close(client.stopBlock)
+
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("stop container: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for StopContainer to return")
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(km.stopCalls) == 1
+	})
 }

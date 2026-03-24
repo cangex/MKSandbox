@@ -45,6 +45,8 @@ type Engine struct {
 	podToContainer map[string]string
 	podCleanup     map[string]struct{}
 	podCleanupCond *sync.Cond
+	containerStop  map[string]struct{}
+	containerCond  *sync.Cond
 	logSync        map[string]*containerLogSync
 	monitors       map[string]context.CancelFunc
 	kernelManager  kernel.Manager
@@ -65,6 +67,7 @@ func NewEngine(km kernel.Manager, af agent.Factory, allocator *util.IPAllocator,
 		containers:     map[string]*model.Container{},
 		podToContainer: map[string]string{},
 		podCleanup:     map[string]struct{}{},
+		containerStop:  map[string]struct{}{},
 		logSync:        map[string]*containerLogSync{},
 		monitors:       map[string]context.CancelFunc{},
 		kernelManager:  km,
@@ -73,6 +76,7 @@ func NewEngine(km kernel.Manager, af agent.Factory, allocator *util.IPAllocator,
 		kernelIDAlloc:  kernelIDAlloc,
 	}
 	e.podCleanupCond = sync.NewCond(&e.mu)
+	e.containerCond = sync.NewCond(&e.mu)
 	return e
 }
 
@@ -114,6 +118,24 @@ func (e *Engine) endPodCleanupLocked(podID string) {
 	e.podCleanupCond.Broadcast()
 }
 
+func (e *Engine) waitForContainerStopLocked(containerID string) {
+	for {
+		if _, busy := e.containerStop[containerID]; !busy {
+			return
+		}
+		e.containerCond.Wait()
+	}
+}
+
+func (e *Engine) beginContainerStopLocked(containerID string) {
+	e.containerStop[containerID] = struct{}{}
+}
+
+func (e *Engine) endContainerStopLocked(containerID string) {
+	delete(e.containerStop, containerID)
+	e.containerCond.Broadcast()
+}
+
 func (e *Engine) syncLogState(containerID string) *containerLogSync {
 	if st, ok := e.logSync[containerID]; ok {
 		return st
@@ -128,6 +150,17 @@ func (e *Engine) stopContainerMonitorLocked(containerID string) {
 		cancel()
 		delete(e.monitors, containerID)
 	}
+}
+
+func (e *Engine) shouldResumeContainerMonitorLocked(containerID string) bool {
+	ctr, ok := e.containers[containerID]
+	if !ok || ctr == nil {
+		return false
+	}
+	if _, ok := e.podCleanup[ctr.PodID]; ok {
+		return false
+	}
+	return true
 }
 
 func (e *Engine) logEOF(containerID string) bool {
@@ -173,6 +206,10 @@ func (e *Engine) syncContainerOnce(ctx context.Context, containerID string) bool
 
 func (e *Engine) cleanupExitedContainer(ctx context.Context, containerID string) bool {
 	e.mu.RLock()
+	if _, busy := e.containerStop[containerID]; busy {
+		e.mu.RUnlock()
+		return false
+	}
 	ctr, ok := e.containers[containerID]
 	if !ok {
 		e.mu.RUnlock()
@@ -641,23 +678,38 @@ func (e *Engine) RefreshContainerStatus(ctx context.Context, containerID string)
 }
 
 func (e *Engine) StopContainer(ctx context.Context, containerID string, timeout time.Duration) error {
-	e.mu.RLock()
+	e.mu.Lock()
+	e.waitForContainerStopLocked(containerID)
 	ctr, ok := e.containers[containerID]
 	if !ok {
-		e.mu.RUnlock()
+		e.mu.Unlock()
 		return nil
 	}
 	pod := e.pods[ctr.PodID]
 	if pod == nil {
-		e.mu.RUnlock()
+		e.mu.Unlock()
 		return fmt.Errorf("pod %s for container %s not found", ctr.PodID, containerID)
 	}
 	kernelObj := e.kernels[pod.KernelID]
-	e.mu.RUnlock()
-
 	if kernelObj == nil {
+		e.mu.Unlock()
 		return fmt.Errorf("kernel for container %s not found", containerID)
 	}
+	_, hadMonitor := e.monitors[containerID]
+	if hadMonitor {
+		e.stopContainerMonitorLocked(containerID)
+	}
+	e.beginContainerStopLocked(containerID)
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.endContainerStopLocked(containerID)
+		shouldResumeMonitor := hadMonitor && e.shouldResumeContainerMonitorLocked(containerID)
+		e.mu.Unlock()
+		if shouldResumeMonitor {
+			e.startContainerMonitor(containerID)
+		}
+	}()
 
 	exitCode, err := e.agentFactory.ForKernel(kernelObj.ID, kernelObj.Endpoint).StopContainer(ctx, containerID, timeout)
 	if err != nil {

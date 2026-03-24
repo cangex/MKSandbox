@@ -30,6 +30,10 @@ func (m *countingKernelManager) StopKernel(_ context.Context, _ string) error {
 type countingClient struct {
 	readLogCalls int
 	lastCreate   agent.ContainerSpec
+	lastStop     struct {
+		containerID string
+		timeout     time.Duration
+	}
 }
 
 func (c *countingClient) WaitReady(_ context.Context) error {
@@ -45,7 +49,9 @@ func (c *countingClient) StartContainer(_ context.Context, _ string) error {
 	return nil
 }
 
-func (c *countingClient) StopContainer(_ context.Context, _ string, _ time.Duration) (int32, error) {
+func (c *countingClient) StopContainer(_ context.Context, containerID string, timeout time.Duration) (int32, error) {
+	c.lastStop.containerID = containerID
+	c.lastStop.timeout = timeout
 	return 0, nil
 }
 
@@ -180,5 +186,52 @@ func TestCreateContainerPassesCommandAndArgs(t *testing.T) {
 	}
 	if client.lastCreate.Args[0] != "while true; do echo tick; sleep 1; done" {
 		t.Fatalf("unexpected args: %#v", client.lastCreate.Args)
+	}
+}
+
+func TestStopContainerUsesDefaultTimeoutWhenUnset(t *testing.T) {
+	client := &countingClient{}
+	server := newCRITestServer(t, client)
+	ctx := context.Background()
+
+	runResp, err := server.RunPodSandbox(ctx, &runtimeapi.RunPodSandboxRequest{
+		Config: &runtimeapi.PodSandboxConfig{
+			Metadata: &runtimeapi.PodSandboxMetadata{
+				Name:      "p",
+				Namespace: "default",
+				Uid:       "u3",
+				Attempt:   1,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("run pod sandbox: %v", err)
+	}
+
+	createResp, err := server.CreateContainer(ctx, &runtimeapi.CreateContainerRequest{
+		PodSandboxId: runResp.PodSandboxId,
+		Config: &runtimeapi.ContainerConfig{
+			Metadata: &runtimeapi.ContainerMetadata{
+				Name:    "c",
+				Attempt: 1,
+			},
+			Image: &runtimeapi.ImageSpec{Image: "busybox"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+
+	if _, err := server.StopContainer(ctx, &runtimeapi.StopContainerRequest{
+		ContainerId: createResp.ContainerId,
+	}); err != nil {
+		t.Fatalf("stop container: %v", err)
+	}
+
+	if got, want := client.lastStop.containerID, createResp.ContainerId; got != want {
+		t.Fatalf("unexpected stop container id: got=%q want=%q", got, want)
+	}
+	if got, want := client.lastStop.timeout, defaultStopContainerTimeout; got != want {
+		t.Fatalf("unexpected default stop timeout: got=%s want=%s", got, want)
 	}
 }
