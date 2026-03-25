@@ -1,15 +1,15 @@
 # mk-guest-agent
 
-`mk-guest-agent` 现在是一个 C 语言实现的 sub-kernel 用户态控制代理骨架。
+`mk-guest-agent` is the guest/sub-kernel user-space control agent, implemented in C.
 
-它保留了之前的分层设计，但替换成了标准 C 工程：
+It keeps the original layered design while using a conventional C project layout:
 
-- `include/`: 对外头文件
-- `src/`: 协议、transport、runtime、dispatcher、main
-- `tests/`: 基于 stub transport 的集成测试
-- `Makefile`: 构建和测试入口
+- `include/`: public headers and guest-side mirrored UAPI headers
+- `src/`: protocol, transport, runtime, session manager, dispatcher, and main
+- `tests/`: integration-style tests built on the stub transport
+- `Makefile`: build and test entrypoint
 
-## 处理流程
+## Request Handling Flow
 
 ```text
 host mkring-bridge
@@ -20,40 +20,51 @@ host mkring-bridge
   -> mkga_transport_send()
 ```
 
-## 当前实现
+## Current Implementation
 
 - `src/agent.c`
-  负责请求分发，处理 `create/start/stop/remove container`
+  - request dispatch for create/start/stop/remove/status/read-log and TTY exec control operations
 - `src/transport_stub.c`
-  提供一个基于 pthread 条件变量的 stub transport，方便本地联调
+  - pthread-based stub transport for local debugging
 - `src/transport_device.c`
-  直接对接 `/dev/mkring_container_bridge`，在启动时发
-  `MKRING_CONTAINER_IOC_SET_READY`，运行时通过 `read()/write()` 转发
-  `REQUEST/RESPONSE`
+  - control-plane device transport for `/dev/mkring_container_bridge`
+  - sends `MKRING_CONTAINER_IOC_SET_READY` at startup
+  - forwards `REQUEST/RESPONSE` through `read()` / `write()`
+- `src/stream_device.c`
+  - data-plane stream transport for `/dev/mkring_stream_bridge`
+  - handles TTY stdin/output/exit frames
 - `src/runtime_memory.c`
-  提供一个内存版 runtime，实现最小容器状态机
+  - in-memory runtime with a minimal container state machine
 - `src/runtime_containerd_stub.c`
-  提供第一版 guest-agent -> containerd 适配，当前通过
-  `fork/exec ctr --address ...` 驱动本地 `containerd.sock`
+  - current guest runtime adapter backed by `fork/exec ctr --address ...`
+  - includes long-running container status/log support and PTY-backed TTY exec support
+- `src/session.c`
+  - guest-side TTY exec session table and stdin handling
 - `src/protocol.c`
-  定义控制消息、错误体和响应构造 helper
+  - control-message helpers, error payloads, and response builders
 
-## 和 mkring 内核 bridge 的对接方式
+## How It Integrates With the mkring Kernel Bridges
 
-`mk-guest-agent` 现在在 `include/mkring_container.h` 内自带一份
-guest 用户态需要的 `mkring-container` ABI 定义，不再直接引用源码树里的
-`mkring_container.h`。目标接法是：
+`mk-guest-agent` carries guest-side mirrored ABI definitions for:
 
-1. guest kernel 加载 `mkring_container_bridge.ko role=guest`
-2. `mk-guest-agent` 以 `mkring-device` transport 打开 `/dev/mkring_container_bridge`
-3. `containerd` runtime 在初始化时通过 `ctr version` 等待本地
-   `containerd.sock` 可用
-4. transport 创建后发 `MKRING_CONTAINER_IOC_SET_READY`
-5. agent 通过 `read()` 收到 host 发来的 `REQUEST`
-6. agent 调本地 runtime
-7. agent 通过 `write()` 把 `RESPONSE` 写回 kernel bridge
+- `include/mkring_container.h`
+- `include/mkring_stream.h`
 
-## 构建
+instead of including kernel-tree headers directly.
+
+The expected wiring is:
+
+1. guest kernel loads `mkring_container_bridge.ko role=guest`
+2. guest kernel loads `mkring_stream_bridge.ko`
+3. `mk-guest-agent` starts with `mkring-device` transport on `/dev/mkring_container_bridge`
+4. the `containerd` runtime path waits for local `containerd.sock` to become ready
+5. transport creation sends `MKRING_CONTAINER_IOC_SET_READY`
+6. the agent receives host `REQUEST`s through `read()`
+7. the agent calls the local runtime
+8. the agent writes `RESPONSE`s back through the kernel bridge
+9. TTY exec traffic flows through `/dev/mkring_stream_bridge`
+
+## Build
 
 ```bash
 cd mk-guest-agent
@@ -61,31 +72,61 @@ make
 make test
 ```
 
-## 环境变量
+For static linking:
+
+```bash
+cd mk-guest-agent
+make STATIC=1
+```
+
+## Environment Variables
 
 - `MK_GUEST_AGENT_TRANSPORT`
-  默认 `stub`，真实链路使用 `mkring-device`
+  - default: `stub`
+  - real control path: `mkring-device`
 - `MK_GUEST_AGENT_RUNTIME`
-  默认 `memory`，可选 `containerd`
+  - default: `memory`
+  - real runtime: `containerd`
 - `MK_GUEST_AGENT_CONTAINERD_SOCKET`
-  默认 `/run/containerd/containerd.sock`
+  - default: `/run/containerd/containerd.sock`
 - `MK_GUEST_AGENT_CTR_PATH`
-  默认 `ctr`
+  - default: `ctr`
 - `MK_GUEST_AGENT_CONTAINERD_NAMESPACE`
-  默认 `mk`
+  - default: `mk`
 - `MK_GUEST_AGENT_CONTAINERD_TIMEOUT_MS`
-  默认 `5000`
+  - default: `5000`
 - `MK_GUEST_AGENT_BRIDGE_DEVICE`
-  默认 `/dev/mkring_container_bridge`
+  - default: `/dev/mkring_container_bridge`
+- `MK_GUEST_AGENT_STREAM_DEVICE`
+  - default: `/dev/mkring_stream_bridge`
 - `MK_GUEST_AGENT_PEER_KERNEL_ID`
-  默认 `0`，表示 host 在 mkring 里的 kernel id
+  - default: `0`
+  - the host kernel id in the `mkring` topology
 - `MK_GUEST_AGENT_INBOUND_BUFFER`
-  默认 `32`
+  - default: `32`
 - `MK_GUEST_AGENT_RECEIVE_TIMEOUT_MS`
-  默认 `200`
+  - default: `200`
 
-## 下一步
+## Current Status
 
-1. 把 `src/runtime_containerd_stub.c` 从 `ctr` 桥接升级成真实 containerd client
-2. 补更完整的 image / task / exit-code 错误映射
-3. 给 `ctr` 路线补单元测试和真实 guest 环境联调
+Today the guest agent supports:
+
+- host-driven create/start/stop/remove/status/read-log,
+- containerd-backed long-running containers,
+- command/args passthrough,
+- guest-side CRI log generation,
+- TTY exec backed by PTY sessions and `/dev/mkring_stream_bridge`,
+- the guest-side backend used by `crictl exec -it`.
+
+What is not finished yet:
+
+- `ExecSync`,
+- `Attach`,
+- a native containerd client implementation that replaces the current `ctr` shell-out path.
+
+## Next Steps
+
+1. Replace more `ctr` shell-out logic with a more direct runtime integration where it is worth the complexity.
+2. Harden image/task/exit-code error mapping.
+3. Expand tests for TTY exec and stream data-plane behavior.
+4. Add `ExecSync` and `Attach` support.

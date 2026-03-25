@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -20,6 +22,7 @@ import (
 	"mk-container/pkg/cri"
 	"mk-container/pkg/kernel"
 	mkrt "mk-container/pkg/runtime"
+	"mk-container/pkg/streaming"
 	"mk-container/pkg/util"
 )
 
@@ -82,8 +85,11 @@ func main() {
 	}
 
 	engine := mkrt.NewEngine(kernelManager, agentFactory, allocator, kernelIDAlloc)
+	streamServer := streaming.NewServer(nil, cfg.StreamBaseURL)
+	streamServer.SetDataPlane(streaming.NewDeviceBridge(cfg.StreamDevicePath))
+	streamServer.SetRemoteCommandAdapter(streaming.NewSPDYRemoteCommandAdapter(nil))
 
-	service := cri.NewServer(engine, cfg.RuntimeName, cfg.RuntimeVersion)
+	service := cri.NewServer(engine, cfg.RuntimeName, cfg.RuntimeVersion, streamServer)
 	grpcServer := grpc.NewServer()
 	runtimeapi.RegisterRuntimeServiceServer(grpcServer, service)
 	runtimeapi.RegisterImageServiceServer(grpcServer, service)
@@ -93,13 +99,27 @@ func main() {
 		log.Fatalf("listen failed: %v", err)
 	}
 
+	streamHTTPServer := &http.Server{
+		Addr:              cfg.StreamListenAddress,
+		Handler:           streamServer,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
 	log.Printf("mkcri started, endpoint=unix://%s runtime=%s", socketPath, service.String())
+	log.Printf("mkcri exec streaming started, address=%s base_url=%s device=%s", cfg.StreamListenAddress, cfg.StreamBaseURL, cfg.StreamDevicePath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
+		if err := streamHTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("streaming serve failed: %v", err)
+		}
+	}()
+
+	go func() {
 		<-ctx.Done()
+		_ = streamHTTPServer.Shutdown(context.Background())
 		grpcServer.GracefulStop()
 		_ = lis.Close()
 		_ = os.Remove(socketPath)

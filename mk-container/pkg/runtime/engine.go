@@ -36,6 +36,14 @@ type ContainerSpec struct {
 	LogPath     string
 }
 
+type ExecTTYSessionRef struct {
+	SessionID    string
+	ContainerID  string
+	KernelID     string
+	Endpoint     string
+	PeerKernelID uint16
+}
+
 type Engine struct {
 	mu sync.RWMutex
 
@@ -48,7 +56,7 @@ type Engine struct {
 	containerStop  map[string]struct{}
 	containerCond  *sync.Cond
 	logSync        map[string]*containerLogSync
-	monitors       map[string]context.CancelFunc
+	monitors       map[string]*containerMonitor
 	kernelManager  kernel.Manager
 	agentFactory   agent.Factory
 	podIPAllocator *util.IPAllocator
@@ -60,6 +68,13 @@ type containerLogSync struct {
 	eof    bool
 }
 
+type containerMonitor struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+const stopContainerResponseBudget = 1500 * time.Millisecond
+
 func NewEngine(km kernel.Manager, af agent.Factory, allocator *util.IPAllocator, kernelIDAlloc *util.IntAllocator) *Engine {
 	e := &Engine{
 		kernels:        map[string]*model.Kernel{},
@@ -69,7 +84,7 @@ func NewEngine(km kernel.Manager, af agent.Factory, allocator *util.IPAllocator,
 		podCleanup:     map[string]struct{}{},
 		containerStop:  map[string]struct{}{},
 		logSync:        map[string]*containerLogSync{},
-		monitors:       map[string]context.CancelFunc{},
+		monitors:       map[string]*containerMonitor{},
 		kernelManager:  km,
 		agentFactory:   af,
 		podIPAllocator: allocator,
@@ -145,11 +160,13 @@ func (e *Engine) syncLogState(containerID string) *containerLogSync {
 	return st
 }
 
-func (e *Engine) stopContainerMonitorLocked(containerID string) {
-	if cancel, ok := e.monitors[containerID]; ok {
-		cancel()
+func (e *Engine) stopContainerMonitorLocked(containerID string) chan struct{} {
+	if mon, ok := e.monitors[containerID]; ok {
+		mon.cancel()
 		delete(e.monitors, containerID)
+		return mon.done
 	}
+	return nil
 }
 
 func (e *Engine) shouldResumeContainerMonitorLocked(containerID string) bool {
@@ -205,6 +222,10 @@ func (e *Engine) syncContainerOnce(ctx context.Context, containerID string) bool
 }
 
 func (e *Engine) cleanupExitedContainer(ctx context.Context, containerID string) bool {
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+
 	e.mu.RLock()
 	if _, busy := e.containerStop[containerID]; busy {
 		e.mu.RUnlock()
@@ -218,6 +239,10 @@ func (e *Engine) cleanupExitedContainer(ctx context.Context, containerID string)
 	podID := ctr.PodID
 	e.mu.RUnlock()
 
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+
 	if err := e.StopPod(ctx, podID); err != nil {
 		if _, ok := e.GetContainer(containerID); !ok {
 			return true
@@ -227,14 +252,21 @@ func (e *Engine) cleanupExitedContainer(ctx context.Context, containerID string)
 	return true
 }
 
-func (e *Engine) monitorContainer(ctx context.Context, containerID string) {
+func (e *Engine) monitorContainer(ctx context.Context, containerID string, mon *containerMonitor) {
+	defer close(mon.done)
+
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	if e.syncContainerOnce(ctx, containerID) {
+		if ctx.Err() != nil {
+			return
+		}
 		if e.cleanupExitedContainer(ctx, containerID) {
 			e.mu.Lock()
-			delete(e.monitors, containerID)
+			if current, ok := e.monitors[containerID]; ok && current == mon {
+				delete(e.monitors, containerID)
+			}
 			e.mu.Unlock()
 			return
 		}
@@ -246,9 +278,14 @@ func (e *Engine) monitorContainer(ctx context.Context, containerID string) {
 			return
 		case <-ticker.C:
 			if e.syncContainerOnce(ctx, containerID) {
+				if ctx.Err() != nil {
+					return
+				}
 				if e.cleanupExitedContainer(ctx, containerID) {
 					e.mu.Lock()
-					delete(e.monitors, containerID)
+					if current, ok := e.monitors[containerID]; ok && current == mon {
+						delete(e.monitors, containerID)
+					}
 					e.mu.Unlock()
 					return
 				}
@@ -259,12 +296,16 @@ func (e *Engine) monitorContainer(ctx context.Context, containerID string) {
 
 func (e *Engine) startContainerMonitor(containerID string) {
 	e.mu.Lock()
-	e.stopContainerMonitorLocked(containerID)
+	done := e.stopContainerMonitorLocked(containerID)
 	ctx, cancel := context.WithCancel(context.Background())
-	e.monitors[containerID] = cancel
+	mon := &containerMonitor{cancel: cancel, done: make(chan struct{})}
+	e.monitors[containerID] = mon
 	e.mu.Unlock()
 
-	go e.monitorContainer(ctx, containerID)
+	if done != nil {
+		<-done
+	}
+	go e.monitorContainer(ctx, containerID, mon)
 }
 
 func (e *Engine) RunPod(ctx context.Context, spec PodSpec) (_ *model.Pod, err error) {
@@ -529,6 +570,79 @@ func (e *Engine) StartContainer(ctx context.Context, containerID string) error {
 	return nil
 }
 
+func (e *Engine) ExecTTYPrepare(ctx context.Context, containerID string, command []string, tty, stdin, stdout, stderr bool) (*ExecTTYSessionRef, error) {
+	e.mu.RLock()
+	ctr, ok := e.containers[containerID]
+	if !ok {
+		e.mu.RUnlock()
+		return nil, fmt.Errorf("container %s not found", containerID)
+	}
+	if ctr.State != model.ContainerStateRunning {
+		e.mu.RUnlock()
+		return nil, fmt.Errorf("container %s is not running", containerID)
+	}
+	pod := e.pods[ctr.PodID]
+	if pod == nil {
+		e.mu.RUnlock()
+		return nil, fmt.Errorf("pod %s for container %s not found", ctr.PodID, containerID)
+	}
+	kernelObj := e.kernels[pod.KernelID]
+	e.mu.RUnlock()
+
+	if kernelObj == nil {
+		return nil, fmt.Errorf("kernel for container %s not found", containerID)
+	}
+
+	resp, err := e.agentFactory.ForKernel(kernelObj.ID, kernelObj.Endpoint).ExecTTYPrepare(ctx, agent.ExecTTYRequest{
+		ContainerID: containerID,
+		Command:     copySlice(command),
+		TTY:         tty,
+		Stdin:       stdin,
+		Stdout:      stdout,
+		Stderr:      stderr,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &ExecTTYSessionRef{
+		SessionID:    resp.SessionID,
+		ContainerID:  containerID,
+		KernelID:     kernelObj.ID,
+		Endpoint:     kernelObj.Endpoint,
+		PeerKernelID: kernelObj.PeerKernelID,
+	}, nil
+}
+
+func (e *Engine) ExecTTYStart(ctx context.Context, session *ExecTTYSessionRef) error {
+	if session == nil {
+		return fmt.Errorf("exec tty session is required")
+	}
+	return e.agentFactory.ForKernel(session.KernelID, session.Endpoint).ExecTTYStart(ctx, agent.ExecTTYStartRequest{
+		SessionID: session.SessionID,
+	})
+}
+
+func (e *Engine) ExecTTYResize(ctx context.Context, session *ExecTTYSessionRef, width, height uint32) error {
+	if session == nil {
+		return fmt.Errorf("exec tty session is required")
+	}
+	return e.agentFactory.ForKernel(session.KernelID, session.Endpoint).ExecTTYResize(ctx, agent.ExecTTYResizeRequest{
+		SessionID: session.SessionID,
+		Width:     width,
+		Height:    height,
+	})
+}
+
+func (e *Engine) ExecTTYClose(ctx context.Context, session *ExecTTYSessionRef) error {
+	if session == nil {
+		return fmt.Errorf("exec tty session is required")
+	}
+	return e.agentFactory.ForKernel(session.KernelID, session.Endpoint).ExecTTYClose(ctx, agent.ExecTTYCloseRequest{
+		SessionID: session.SessionID,
+	})
+}
+
 func (e *Engine) SyncContainerLogs(ctx context.Context, containerID string) error {
 	e.mu.RLock()
 	ctr, ok := e.containers[containerID]
@@ -695,11 +809,12 @@ func (e *Engine) StopContainer(ctx context.Context, containerID string, timeout 
 		e.mu.Unlock()
 		return fmt.Errorf("kernel for container %s not found", containerID)
 	}
-	_, hadMonitor := e.monitors[containerID]
-	if hadMonitor {
-		e.stopContainerMonitorLocked(containerID)
-	}
 	e.beginContainerStopLocked(containerID)
+	_, hadMonitor := e.monitors[containerID]
+	var monitorDone chan struct{}
+	if hadMonitor {
+		monitorDone = e.stopContainerMonitorLocked(containerID)
+	}
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
@@ -711,7 +826,28 @@ func (e *Engine) StopContainer(ctx context.Context, containerID string, timeout 
 		}
 	}()
 
-	exitCode, err := e.agentFactory.ForKernel(kernelObj.ID, kernelObj.Endpoint).StopContainer(ctx, containerID, timeout)
+	if monitorDone != nil {
+		<-monitorDone
+	}
+
+	remoteTimeout := timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return context.DeadlineExceeded
+		}
+		if remaining > stopContainerResponseBudget {
+			remaining -= stopContainerResponseBudget
+		}
+		if remoteTimeout <= 0 || remaining < remoteTimeout {
+			remoteTimeout = remaining
+		}
+	}
+	if remoteTimeout <= 0 {
+		remoteTimeout = timeout
+	}
+
+	exitCode, err := e.agentFactory.ForKernel(kernelObj.ID, kernelObj.Endpoint).StopContainer(ctx, containerID, remoteTimeout)
 	if err != nil {
 		return err
 	}

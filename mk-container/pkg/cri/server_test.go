@@ -2,6 +2,7 @@ package cri
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"mk-container/pkg/agent"
 	"mk-container/pkg/kernel"
 	mkrt "mk-container/pkg/runtime"
+	"mk-container/pkg/streaming"
 	"mk-container/pkg/util"
 )
 
@@ -34,6 +36,7 @@ type countingClient struct {
 		containerID string
 		timeout     time.Duration
 	}
+	lastExecPrepare agent.ExecTTYRequest
 }
 
 func (c *countingClient) WaitReady(_ context.Context) error {
@@ -68,6 +71,23 @@ func (c *countingClient) ReadLog(_ context.Context, _ string, offset uint64, _ i
 	return &agent.LogChunk{NextOffset: offset, EOF: true}, nil
 }
 
+func (c *countingClient) ExecTTYPrepare(_ context.Context, req agent.ExecTTYRequest) (*agent.ExecTTYPrepareResult, error) {
+	c.lastExecPrepare = req
+	return &agent.ExecTTYPrepareResult{SessionID: "exec-session-test"}, nil
+}
+
+func (c *countingClient) ExecTTYStart(_ context.Context, _ agent.ExecTTYStartRequest) error {
+	return agent.ErrNotImplemented
+}
+
+func (c *countingClient) ExecTTYResize(_ context.Context, _ agent.ExecTTYResizeRequest) error {
+	return agent.ErrNotImplemented
+}
+
+func (c *countingClient) ExecTTYClose(_ context.Context, _ agent.ExecTTYCloseRequest) error {
+	return agent.ErrNotImplemented
+}
+
 type countingFactory struct {
 	client *countingClient
 }
@@ -89,7 +109,7 @@ func newCRITestServer(t *testing.T, client *countingClient) *Server {
 	}
 
 	engine := mkrt.NewEngine(&countingKernelManager{}, &countingFactory{client: client}, allocator, kernelIDs)
-	return NewServer(engine, "mkcri", "test")
+	return NewServer(engine, "mkcri", "test", streaming.NewServer(nil, "http://127.0.0.1:10010"))
 }
 
 func TestContainerQueriesDoNotSyncLogs(t *testing.T) {
@@ -233,5 +253,65 @@ func TestStopContainerUsesDefaultTimeoutWhenUnset(t *testing.T) {
 	}
 	if got, want := client.lastStop.timeout, defaultStopContainerTimeout; got != want {
 		t.Fatalf("unexpected default stop timeout: got=%s want=%s", got, want)
+	}
+}
+
+func TestExecReturnsStreamingURL(t *testing.T) {
+	client := &countingClient{}
+	server := newCRITestServer(t, client)
+	ctx := context.Background()
+
+	runResp, err := server.RunPodSandbox(ctx, &runtimeapi.RunPodSandboxRequest{
+		Config: &runtimeapi.PodSandboxConfig{
+			Metadata: &runtimeapi.PodSandboxMetadata{
+				Name:      "p",
+				Namespace: "default",
+				Uid:       "u4",
+				Attempt:   1,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("run pod sandbox: %v", err)
+	}
+
+	createResp, err := server.CreateContainer(ctx, &runtimeapi.CreateContainerRequest{
+		PodSandboxId: runResp.PodSandboxId,
+		Config: &runtimeapi.ContainerConfig{
+			Metadata: &runtimeapi.ContainerMetadata{
+				Name:    "c",
+				Attempt: 1,
+			},
+			Image: &runtimeapi.ImageSpec{Image: "busybox"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+
+	if _, err := server.StartContainer(ctx, &runtimeapi.StartContainerRequest{
+		ContainerId: createResp.ContainerId,
+	}); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+
+	resp, err := server.Exec(ctx, &runtimeapi.ExecRequest{
+		ContainerId: createResp.ContainerId,
+		Cmd:         []string{"sh"},
+		Tty:         true,
+		Stdin:       true,
+		Stdout:      true,
+	})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !strings.HasPrefix(resp.GetUrl(), "http://127.0.0.1:10010/exec/") {
+		t.Fatalf("unexpected exec url: %q", resp.GetUrl())
+	}
+	if client.lastExecPrepare.ContainerID != createResp.ContainerId {
+		t.Fatalf("unexpected exec prepare container id: got=%q want=%q", client.lastExecPrepare.ContainerID, createResp.ContainerId)
+	}
+	if len(client.lastExecPrepare.Command) != 1 || client.lastExecPrepare.Command[0] != "sh" {
+		t.Fatalf("unexpected exec command: %#v", client.lastExecPrepare.Command)
 	}
 }

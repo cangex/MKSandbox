@@ -101,6 +101,22 @@ func (c *mockClient) ReadLog(_ context.Context, containerID string, offset uint6
 	}, nil
 }
 
+func (c *mockClient) ExecTTYPrepare(_ context.Context, _ ExecTTYRequest) (*ExecTTYPrepareResult, error) {
+	return nil, ErrNotImplemented
+}
+
+func (c *mockClient) ExecTTYStart(_ context.Context, _ ExecTTYStartRequest) error {
+	return ErrNotImplemented
+}
+
+func (c *mockClient) ExecTTYResize(_ context.Context, _ ExecTTYResizeRequest) error {
+	return ErrNotImplemented
+}
+
+func (c *mockClient) ExecTTYClose(_ context.Context, _ ExecTTYCloseRequest) error {
+	return ErrNotImplemented
+}
+
 type MockFactory struct {
 	mu      sync.Mutex
 	clients map[string]*mockClient

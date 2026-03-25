@@ -24,6 +24,10 @@ const (
 	OpRemoveContainer Operation = "remove_container"
 	OpStatusContainer Operation = "status_container"
 	OpReadLog         Operation = "read_log"
+	OpExecTTYPrepare  Operation = "exec_tty_prepare"
+	OpExecTTYStart    Operation = "exec_tty_start"
+	OpExecTTYResize   Operation = "exec_tty_resize"
+	OpExecTTYClose    Operation = "exec_tty_close"
 )
 
 // Envelope is the logical request/response unit exchanged between the host
@@ -112,6 +116,37 @@ type ReadLogResult struct {
 	NextOffset uint64 `json:"next_offset"`
 	EOF        bool   `json:"eof"`
 	Data       []byte `json:"data,omitempty"`
+}
+
+type ExecTTYPreparePayload struct {
+	KernelID    string   `json:"kernel_id"`
+	ContainerID string   `json:"container_id"`
+	Command     []string `json:"command"`
+	TTY         bool     `json:"tty"`
+	Stdin       bool     `json:"stdin"`
+	Stdout      bool     `json:"stdout"`
+	Stderr      bool     `json:"stderr"`
+}
+
+type ExecTTYPrepareResult struct {
+	SessionID string `json:"session_id"`
+}
+
+type ExecTTYStartPayload struct {
+	KernelID  string `json:"kernel_id"`
+	SessionID string `json:"session_id"`
+}
+
+type ExecTTYResizePayload struct {
+	KernelID  string `json:"kernel_id"`
+	SessionID string `json:"session_id"`
+	Width     uint32 `json:"width"`
+	Height    uint32 `json:"height"`
+}
+
+type ExecTTYClosePayload struct {
+	KernelID  string `json:"kernel_id"`
+	SessionID string `json:"session_id"`
 }
 
 func NewRequest(id string, peerKernelID uint16, kernelID string, op Operation, payload interface{}) (Envelope, error) {

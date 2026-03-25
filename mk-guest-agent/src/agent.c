@@ -107,14 +107,59 @@ int mkga_agent_handle(struct mkga_agent *agent,
 		return 0;
 
 	case MKGA_OP_READ_LOG:
-		mkga_envelope_make_response(req, resp);
-		rc = mkga_runtime_read_log(
-			agent->runtime,
-			&req->payload.read_log_req,
+			mkga_envelope_make_response(req, resp);
+			rc = mkga_runtime_read_log(
+				agent->runtime,
+				&req->payload.read_log_req,
 			&resp->payload.read_log_resp);
 		if (rc != 0) {
 			mkga_envelope_set_error(req, resp, mkga_strerror_name(rc),
 					      "read_log failed");
+			}
+			return 0;
+
+	case MKGA_OP_EXEC_TTY_PREPARE:
+		mkga_envelope_make_response(req, resp);
+		rc = mkga_runtime_exec_tty_prepare(
+			agent->runtime,
+			&req->payload.exec_tty_prepare_req,
+			&resp->payload.exec_tty_prepare_resp);
+		if (rc != 0) {
+			mkga_envelope_set_error(req, resp, mkga_strerror_name(rc),
+					      "exec_tty_prepare failed");
+		}
+		return 0;
+
+	case MKGA_OP_EXEC_TTY_START:
+		mkga_envelope_make_response(req, resp);
+		rc = mkga_runtime_exec_tty_start(
+			agent->runtime,
+			&req->payload.exec_session_control_req);
+		if (rc != 0) {
+			mkga_envelope_set_error(req, resp, mkga_strerror_name(rc),
+					      "exec_tty_start failed");
+		}
+		return 0;
+
+	case MKGA_OP_EXEC_TTY_RESIZE:
+		mkga_envelope_make_response(req, resp);
+		rc = mkga_runtime_exec_tty_resize(
+			agent->runtime,
+			&req->payload.exec_tty_resize_req);
+		if (rc != 0) {
+			mkga_envelope_set_error(req, resp, mkga_strerror_name(rc),
+					      "exec_tty_resize failed");
+		}
+		return 0;
+
+	case MKGA_OP_EXEC_TTY_CLOSE:
+		mkga_envelope_make_response(req, resp);
+		rc = mkga_runtime_exec_tty_close(
+			agent->runtime,
+			&req->payload.exec_session_control_req);
+		if (rc != 0) {
+			mkga_envelope_set_error(req, resp, mkga_strerror_name(rc),
+					      "exec_tty_close failed");
 		}
 		return 0;
 

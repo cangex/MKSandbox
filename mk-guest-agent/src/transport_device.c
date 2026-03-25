@@ -54,6 +54,14 @@ static enum mkga_operation mkga_operation_from_mkring(uint8_t operation)
 		return MKGA_OP_STATUS_CONTAINER;
 	case MKRING_CONTAINER_OP_READ_LOG:
 		return MKGA_OP_READ_LOG;
+	case MKRING_CONTAINER_OP_EXEC_TTY_PREPARE:
+		return MKGA_OP_EXEC_TTY_PREPARE;
+	case MKRING_CONTAINER_OP_EXEC_TTY_START:
+		return MKGA_OP_EXEC_TTY_START;
+	case MKRING_CONTAINER_OP_EXEC_TTY_RESIZE:
+		return MKGA_OP_EXEC_TTY_RESIZE;
+	case MKRING_CONTAINER_OP_EXEC_TTY_CLOSE:
+		return MKGA_OP_EXEC_TTY_CLOSE;
 	default:
 		return MKGA_OP_INVALID;
 	}
@@ -74,6 +82,14 @@ static uint8_t mkga_operation_to_mkring(enum mkga_operation operation)
 		return MKRING_CONTAINER_OP_STATUS;
 	case MKGA_OP_READ_LOG:
 		return MKRING_CONTAINER_OP_READ_LOG;
+	case MKGA_OP_EXEC_TTY_PREPARE:
+		return MKRING_CONTAINER_OP_EXEC_TTY_PREPARE;
+	case MKGA_OP_EXEC_TTY_START:
+		return MKRING_CONTAINER_OP_EXEC_TTY_START;
+	case MKGA_OP_EXEC_TTY_RESIZE:
+		return MKRING_CONTAINER_OP_EXEC_TTY_RESIZE;
+	case MKGA_OP_EXEC_TTY_CLOSE:
+		return MKRING_CONTAINER_OP_EXEC_TTY_CLOSE;
 	default:
 		return MKRING_CONTAINER_OP_NONE;
 	}
@@ -133,6 +149,14 @@ static bool mkga_message_matches_operation(const struct mkring_container_message
 		return msg->hdr.payload_len == sizeof(msg->payload.create_req);
 	case MKRING_CONTAINER_OP_READ_LOG:
 		return msg->hdr.payload_len == sizeof(msg->payload.read_log_req);
+	case MKRING_CONTAINER_OP_EXEC_TTY_PREPARE:
+		return msg->hdr.payload_len == sizeof(msg->payload.exec_tty_prepare_req);
+	case MKRING_CONTAINER_OP_EXEC_TTY_START:
+		return msg->hdr.payload_len == sizeof(msg->payload.exec_tty_start_req);
+	case MKRING_CONTAINER_OP_EXEC_TTY_RESIZE:
+		return msg->hdr.payload_len == sizeof(msg->payload.exec_tty_resize_req);
+	case MKRING_CONTAINER_OP_EXEC_TTY_CLOSE:
+		return msg->hdr.payload_len == sizeof(msg->payload.exec_tty_close_req);
 	case MKRING_CONTAINER_OP_START:
 	case MKRING_CONTAINER_OP_STOP:
 	case MKRING_CONTAINER_OP_REMOVE:
@@ -234,6 +258,98 @@ static int mkga_decode_request_packet(const struct mkring_container_packet *pack
 		req->payload.read_log_req.max_bytes = packet->msg.payload.read_log_req.max_bytes;
 		return 0;
 
+	case MKGA_OP_EXEC_TTY_PREPARE:
+		mkga_copy_bounded_string(
+			req->kernel_id, sizeof(req->kernel_id),
+			packet->msg.payload.exec_tty_prepare_req.kernel_id,
+			sizeof(packet->msg.payload.exec_tty_prepare_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.exec_tty_prepare_req.kernel_id,
+			sizeof(req->payload.exec_tty_prepare_req.kernel_id),
+			packet->msg.payload.exec_tty_prepare_req.kernel_id,
+			sizeof(packet->msg.payload.exec_tty_prepare_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.exec_tty_prepare_req.container_id,
+			sizeof(req->payload.exec_tty_prepare_req.container_id),
+			packet->msg.payload.exec_tty_prepare_req.container_id,
+			sizeof(packet->msg.payload.exec_tty_prepare_req.container_id));
+		req->payload.exec_tty_prepare_req.argv_count =
+			packet->msg.payload.exec_tty_prepare_req.argv_count;
+		if (req->payload.exec_tty_prepare_req.argv_count > MKGA_MAX_ARGV) {
+			return -EINVAL;
+		}
+		req->payload.exec_tty_prepare_req.tty =
+			packet->msg.payload.exec_tty_prepare_req.tty;
+		req->payload.exec_tty_prepare_req.stdin_enabled =
+			packet->msg.payload.exec_tty_prepare_req.stdin_enabled;
+		req->payload.exec_tty_prepare_req.stdout_enabled =
+			packet->msg.payload.exec_tty_prepare_req.stdout_enabled;
+		req->payload.exec_tty_prepare_req.stderr_enabled =
+			packet->msg.payload.exec_tty_prepare_req.stderr_enabled;
+		for (size_t i = 0; i < req->payload.exec_tty_prepare_req.argv_count; i++) {
+			mkga_copy_bounded_string(
+				req->payload.exec_tty_prepare_req.argv[i],
+				sizeof(req->payload.exec_tty_prepare_req.argv[i]),
+				packet->msg.payload.exec_tty_prepare_req.argv[i],
+				sizeof(packet->msg.payload.exec_tty_prepare_req.argv[i]));
+		}
+		return 0;
+
+	case MKGA_OP_EXEC_TTY_START:
+		mkga_copy_bounded_string(
+			req->kernel_id, sizeof(req->kernel_id),
+			packet->msg.payload.exec_tty_start_req.kernel_id,
+			sizeof(packet->msg.payload.exec_tty_start_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.exec_session_control_req.kernel_id,
+			sizeof(req->payload.exec_session_control_req.kernel_id),
+			packet->msg.payload.exec_tty_start_req.kernel_id,
+			sizeof(packet->msg.payload.exec_tty_start_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.exec_session_control_req.session_id,
+			sizeof(req->payload.exec_session_control_req.session_id),
+			packet->msg.payload.exec_tty_start_req.session_id,
+			sizeof(packet->msg.payload.exec_tty_start_req.session_id));
+		return 0;
+
+	case MKGA_OP_EXEC_TTY_RESIZE:
+		mkga_copy_bounded_string(
+			req->kernel_id, sizeof(req->kernel_id),
+			packet->msg.payload.exec_tty_resize_req.kernel_id,
+			sizeof(packet->msg.payload.exec_tty_resize_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.exec_tty_resize_req.kernel_id,
+			sizeof(req->payload.exec_tty_resize_req.kernel_id),
+			packet->msg.payload.exec_tty_resize_req.kernel_id,
+			sizeof(packet->msg.payload.exec_tty_resize_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.exec_tty_resize_req.session_id,
+			sizeof(req->payload.exec_tty_resize_req.session_id),
+			packet->msg.payload.exec_tty_resize_req.session_id,
+			sizeof(packet->msg.payload.exec_tty_resize_req.session_id));
+		req->payload.exec_tty_resize_req.width =
+			packet->msg.payload.exec_tty_resize_req.width;
+		req->payload.exec_tty_resize_req.height =
+			packet->msg.payload.exec_tty_resize_req.height;
+		return 0;
+
+	case MKGA_OP_EXEC_TTY_CLOSE:
+		mkga_copy_bounded_string(
+			req->kernel_id, sizeof(req->kernel_id),
+			packet->msg.payload.exec_tty_close_req.kernel_id,
+			sizeof(packet->msg.payload.exec_tty_close_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.exec_session_control_req.kernel_id,
+			sizeof(req->payload.exec_session_control_req.kernel_id),
+			packet->msg.payload.exec_tty_close_req.kernel_id,
+			sizeof(packet->msg.payload.exec_tty_close_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.exec_session_control_req.session_id,
+			sizeof(req->payload.exec_session_control_req.session_id),
+			packet->msg.payload.exec_tty_close_req.session_id,
+			sizeof(packet->msg.payload.exec_tty_close_req.session_id));
+		return 0;
+
 	case MKGA_OP_START_CONTAINER:
 	case MKGA_OP_STOP_CONTAINER:
 	case MKGA_OP_REMOVE_CONTAINER:
@@ -311,6 +427,9 @@ static int mkga_encode_response_packet(const struct mkga_envelope *resp,
 
 		case MKGA_OP_START_CONTAINER:
 		case MKGA_OP_REMOVE_CONTAINER:
+		case MKGA_OP_EXEC_TTY_START:
+		case MKGA_OP_EXEC_TTY_RESIZE:
+		case MKGA_OP_EXEC_TTY_CLOSE:
 			packet->msg.hdr.payload_len = 0;
 			return 0;
 
@@ -348,6 +467,15 @@ static int mkga_encode_response_packet(const struct mkga_envelope *resp,
 			memcpy(packet->msg.payload.read_log_resp.data,
 			       resp->payload.read_log_resp.data,
 			       sizeof(resp->payload.read_log_resp.data));
+			return 0;
+
+		case MKGA_OP_EXEC_TTY_PREPARE:
+			packet->msg.hdr.payload_len =
+				sizeof(packet->msg.payload.exec_tty_prepare_resp);
+			mkga_copy_string(
+				packet->msg.payload.exec_tty_prepare_resp.session_id,
+				sizeof(packet->msg.payload.exec_tty_prepare_resp.session_id),
+				resp->payload.exec_tty_prepare_resp.session_id);
 			return 0;
 
 		default:

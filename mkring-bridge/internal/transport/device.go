@@ -24,13 +24,17 @@ const (
 	mkringContainerKindRequest  = 2
 	mkringContainerKindResponse = 3
 
-	mkringContainerOpNone    = 0
-	mkringContainerOpCreate  = 1
-	mkringContainerOpStart   = 2
-	mkringContainerOpStop    = 3
-	mkringContainerOpRemove  = 4
-	mkringContainerOpStatus  = 5
-	mkringContainerOpReadLog = 6
+	mkringContainerOpNone           = 0
+	mkringContainerOpCreate         = 1
+	mkringContainerOpStart          = 2
+	mkringContainerOpStop           = 3
+	mkringContainerOpRemove         = 4
+	mkringContainerOpStatus         = 5
+	mkringContainerOpReadLog        = 6
+	mkringContainerOpExecTTYPrepare = 7
+	mkringContainerOpExecTTYStart   = 8
+	mkringContainerOpExecTTYResize  = 9
+	mkringContainerOpExecTTYClose   = 10
 
 	mkringContainerMaxRuntimeName = 16
 	mkringContainerMaxKernelID    = 64
@@ -45,19 +49,24 @@ const (
 	mkringContainerMaxErrorMsg    = 128
 	mkringContainerMaxLogChunk    = 384
 
-	containerHeaderSize          = 28
-	containerPayloadSize         = 968
-	containerMessageSize         = 996
-	containerWaitReadySize       = 12
-	containerCallSize            = 2004
-	containerCreateRequestSize   = 968
-	containerControlRequestSize  = 136
-	containerReadLogRequestSize  = 140
-	containerCreateResponseSize  = 320
-	containerStopResponseSize    = 4
-	containerStatusResponseSize  = 156
-	containerReadLogResponseSize = 400
-	containerErrorPayloadSize    = 132
+	containerHeaderSize                 = 28
+	containerPayloadSize                = 968
+	containerMessageSize                = 996
+	containerWaitReadySize              = 12
+	containerCallSize                   = 2004
+	containerCreateRequestSize          = 968
+	containerControlRequestSize         = 136
+	containerReadLogRequestSize         = 140
+	containerExecTTYPrepareRequestSize  = 392
+	containerExecTTYStartRequestSize    = 128
+	containerExecTTYResizeRequestSize   = 136
+	containerExecTTYCloseRequestSize    = 128
+	containerCreateResponseSize         = 320
+	containerStopResponseSize           = 4
+	containerStatusResponseSize         = 156
+	containerReadLogResponseSize        = 400
+	containerExecTTYPrepareResponseSize = 64
+	containerErrorPayloadSize           = 132
 
 	iocNRBits   = 8
 	iocTypeBits = 8
@@ -156,6 +165,34 @@ type containerReadLogRequest struct {
 	MaxBytes    uint32
 }
 
+type containerExecTTYPrepareRequest struct {
+	KernelID      [mkringContainerMaxKernelID]byte
+	ContainerID   [mkringContainerMaxContainerID]byte
+	ArgvCount     uint32
+	TTY           uint8
+	StdinEnabled  uint8
+	StdoutEnabled uint8
+	StderrEnabled uint8
+	Argv          [mkringContainerMaxArgv][mkringContainerMaxArgLen]byte
+}
+
+type containerExecTTYStartRequest struct {
+	KernelID  [mkringContainerMaxKernelID]byte
+	SessionID [mkringContainerMaxContainerID]byte
+}
+
+type containerExecTTYResizeRequest struct {
+	KernelID  [mkringContainerMaxKernelID]byte
+	SessionID [mkringContainerMaxContainerID]byte
+	Width     uint32
+	Height    uint32
+}
+
+type containerExecTTYCloseRequest struct {
+	KernelID  [mkringContainerMaxKernelID]byte
+	SessionID [mkringContainerMaxContainerID]byte
+}
+
 type containerCreateResponse struct {
 	ContainerID [mkringContainerMaxContainerID]byte
 	ImageRef    [mkringContainerMaxImageRef]byte
@@ -180,6 +217,10 @@ type containerReadLogResponse struct {
 	EOF        uint8
 	Reserved0  [3]byte
 	Data       [mkringContainerMaxLogChunk]byte
+}
+
+type containerExecTTYPrepareResponse struct {
+	SessionID [mkringContainerMaxContainerID]byte
 }
 
 type containerErrorPayload struct {
@@ -336,9 +377,13 @@ func timeoutMillisForRequest(ctx context.Context, req protocol.Envelope) (uint32
 		return effectiveTimeoutMillis(ctx, time.Duration(payload.TimeoutMillis)*time.Millisecond)
 	case protocol.OpReadLog:
 		return effectiveTimeoutMillis(ctx, 0)
+	case protocol.OpExecTTYPrepare, protocol.OpExecTTYStart, protocol.OpExecTTYResize, protocol.OpExecTTYClose:
+		return effectiveTimeoutMillis(ctx, 0)
 	default:
 		return 0, fmt.Errorf("unsupported operation %q", req.Operation)
 	}
+
+	return 0, fmt.Errorf("unsupported operation %q", req.Operation)
 }
 
 func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
@@ -433,6 +478,95 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 		}
 		copy(msg.Payload[:], encoded)
 		msg.Header.PayloadLen = uint32(containerReadLogRequestSize)
+	case protocol.OpExecTTYPrepare:
+		var payload protocol.ExecTTYPreparePayload
+		if err := protocol.DecodePayload(req, &payload); err != nil {
+			return containerMessage{}, err
+		}
+		if len(payload.Command) > mkringContainerMaxArgv {
+			return containerMessage{}, fmt.Errorf("argv length %d exceeds max %d", len(payload.Command), mkringContainerMaxArgv)
+		}
+		execReq := containerExecTTYPrepareRequest{
+			TTY:           boolToU8(payload.TTY),
+			StdinEnabled:  boolToU8(payload.Stdin),
+			StdoutEnabled: boolToU8(payload.Stdout),
+			StderrEnabled: boolToU8(payload.Stderr),
+			ArgvCount:     uint32(len(payload.Command)),
+		}
+		if err := copyCString(execReq.KernelID[:], payload.KernelID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(execReq.ContainerID[:], payload.ContainerID); err != nil {
+			return containerMessage{}, err
+		}
+		for i, arg := range payload.Command {
+			if err := copyCString(execReq.Argv[i][:], arg); err != nil {
+				return containerMessage{}, err
+			}
+		}
+		encoded, err := encodeStruct(execReq, containerExecTTYPrepareRequestSize)
+		if err != nil {
+			return containerMessage{}, err
+		}
+		copy(msg.Payload[:], encoded)
+		msg.Header.PayloadLen = uint32(containerExecTTYPrepareRequestSize)
+	case protocol.OpExecTTYStart:
+		var payload protocol.ExecTTYStartPayload
+		if err := protocol.DecodePayload(req, &payload); err != nil {
+			return containerMessage{}, err
+		}
+		startReq := containerExecTTYStartRequest{}
+		if err := copyCString(startReq.KernelID[:], payload.KernelID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(startReq.SessionID[:], payload.SessionID); err != nil {
+			return containerMessage{}, err
+		}
+		encoded, err := encodeStruct(startReq, containerExecTTYStartRequestSize)
+		if err != nil {
+			return containerMessage{}, err
+		}
+		copy(msg.Payload[:], encoded)
+		msg.Header.PayloadLen = uint32(containerExecTTYStartRequestSize)
+	case protocol.OpExecTTYResize:
+		var payload protocol.ExecTTYResizePayload
+		if err := protocol.DecodePayload(req, &payload); err != nil {
+			return containerMessage{}, err
+		}
+		resizeReq := containerExecTTYResizeRequest{
+			Width:  payload.Width,
+			Height: payload.Height,
+		}
+		if err := copyCString(resizeReq.KernelID[:], payload.KernelID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(resizeReq.SessionID[:], payload.SessionID); err != nil {
+			return containerMessage{}, err
+		}
+		encoded, err := encodeStruct(resizeReq, containerExecTTYResizeRequestSize)
+		if err != nil {
+			return containerMessage{}, err
+		}
+		copy(msg.Payload[:], encoded)
+		msg.Header.PayloadLen = uint32(containerExecTTYResizeRequestSize)
+	case protocol.OpExecTTYClose:
+		var payload protocol.ExecTTYClosePayload
+		if err := protocol.DecodePayload(req, &payload); err != nil {
+			return containerMessage{}, err
+		}
+		closeReq := containerExecTTYCloseRequest{}
+		if err := copyCString(closeReq.KernelID[:], payload.KernelID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(closeReq.SessionID[:], payload.SessionID); err != nil {
+			return containerMessage{}, err
+		}
+		encoded, err := encodeStruct(closeReq, containerExecTTYCloseRequestSize)
+		if err != nil {
+			return containerMessage{}, err
+		}
+		copy(msg.Payload[:], encoded)
+		msg.Header.PayloadLen = uint32(containerExecTTYCloseRequestSize)
 	default:
 		return containerMessage{}, fmt.Errorf("unsupported operation %q", req.Operation)
 	}
@@ -493,7 +627,7 @@ func decodeResponseEnvelope(req protocol.Envelope, call containerCall) (protocol
 			ContainerID: cString(payload.ContainerID[:]),
 			ImageRef:    cString(payload.ImageRef[:]),
 		})
-	case protocol.OpStartContainer, protocol.OpRemoveContainer:
+	case protocol.OpStartContainer, protocol.OpRemoveContainer, protocol.OpExecTTYStart, protocol.OpExecTTYResize, protocol.OpExecTTYClose:
 		if resp.Header.PayloadLen != 0 {
 			return protocol.Envelope{}, fmt.Errorf("unexpected empty-response payload length %d", resp.Header.PayloadLen)
 		}
@@ -541,9 +675,22 @@ func decodeResponseEnvelope(req protocol.Envelope, call containerCall) (protocol
 			EOF:        payload.EOF != 0,
 			Data:       data,
 		})
+	case protocol.OpExecTTYPrepare:
+		if resp.Header.PayloadLen != containerExecTTYPrepareResponseSize {
+			return protocol.Envelope{}, fmt.Errorf("unexpected exec-tty-prepare response payload length %d", resp.Header.PayloadLen)
+		}
+		var payload containerExecTTYPrepareResponse
+		if err := decodeStruct(resp.Payload[:containerExecTTYPrepareResponseSize], &payload); err != nil {
+			return protocol.Envelope{}, err
+		}
+		return protocol.NewResponse(req, protocol.ExecTTYPrepareResult{
+			SessionID: cString(payload.SessionID[:]),
+		})
 	default:
 		return protocol.Envelope{}, fmt.Errorf("unsupported operation %q", req.Operation)
 	}
+
+	return protocol.Envelope{}, fmt.Errorf("unsupported operation %q", req.Operation)
 }
 
 func decodeErrorEnvelope(req protocol.Envelope, resp containerMessage, status int32) protocol.Envelope {
@@ -579,9 +726,24 @@ func operationToUAPI(op protocol.Operation) (uint8, error) {
 		return mkringContainerOpStatus, nil
 	case protocol.OpReadLog:
 		return mkringContainerOpReadLog, nil
+	case protocol.OpExecTTYPrepare:
+		return mkringContainerOpExecTTYPrepare, nil
+	case protocol.OpExecTTYStart:
+		return mkringContainerOpExecTTYStart, nil
+	case protocol.OpExecTTYResize:
+		return mkringContainerOpExecTTYResize, nil
+	case protocol.OpExecTTYClose:
+		return mkringContainerOpExecTTYClose, nil
 	default:
 		return 0, fmt.Errorf("unsupported operation %q", op)
 	}
+}
+
+func boolToU8(v bool) uint8 {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func uapiStateToProtocol(state uint32) protocol.ContainerStatusState {

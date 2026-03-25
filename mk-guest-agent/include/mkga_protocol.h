@@ -16,6 +16,7 @@
 #define MKGA_MAX_LOG_PATH_LEN 256
 #define MKGA_MAX_ARGV 4
 #define MKGA_MAX_ARG_LEN 64
+#define MKGA_MAX_SESSION_ID_LEN 64
 #define MKGA_MAX_KV_PAIRS 8
 #define MKGA_MAX_KV_KEY_LEN 64
 #define MKGA_MAX_KV_VALUE_LEN 256
@@ -34,6 +35,10 @@ enum mkga_operation {
 	MKGA_OP_REMOVE_CONTAINER = 4,
 	MKGA_OP_STATUS_CONTAINER = 5,
 	MKGA_OP_READ_LOG = 6,
+	MKGA_OP_EXEC_TTY_PREPARE = 7,
+	MKGA_OP_EXEC_TTY_START = 8,
+	MKGA_OP_EXEC_TTY_RESIZE = 9,
+	MKGA_OP_EXEC_TTY_CLOSE = 10,
 };
 
 enum mkga_container_state {
@@ -108,6 +113,33 @@ struct mkga_read_log_resp {
 	uint8_t data[MKGA_MAX_LOG_CHUNK];
 };
 
+struct mkga_exec_tty_prepare_req {
+	char kernel_id[MKGA_MAX_KERNEL_ID_LEN];
+	char container_id[MKGA_MAX_ID_LEN];
+	uint32_t argv_count;
+	uint8_t tty;
+	uint8_t stdin_enabled;
+	uint8_t stdout_enabled;
+	uint8_t stderr_enabled;
+	char argv[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN];
+};
+
+struct mkga_exec_tty_prepare_resp {
+	char session_id[MKGA_MAX_SESSION_ID_LEN];
+};
+
+struct mkga_exec_session_control_req {
+	char kernel_id[MKGA_MAX_KERNEL_ID_LEN];
+	char session_id[MKGA_MAX_SESSION_ID_LEN];
+};
+
+struct mkga_exec_tty_resize_req {
+	char kernel_id[MKGA_MAX_KERNEL_ID_LEN];
+	char session_id[MKGA_MAX_SESSION_ID_LEN];
+	uint32_t width;
+	uint32_t height;
+};
+
 union mkga_payload {
 	struct mkga_create_container_req create_container_req;
 	struct mkga_create_container_resp create_container_resp;
@@ -116,6 +148,10 @@ union mkga_payload {
 	struct mkga_container_status_resp container_status_resp;
 	struct mkga_read_log_req read_log_req;
 	struct mkga_read_log_resp read_log_resp;
+	struct mkga_exec_tty_prepare_req exec_tty_prepare_req;
+	struct mkga_exec_tty_prepare_resp exec_tty_prepare_resp;
+	struct mkga_exec_session_control_req exec_session_control_req;
+	struct mkga_exec_tty_resize_req exec_tty_resize_req;
 };
 
 struct mkga_envelope {

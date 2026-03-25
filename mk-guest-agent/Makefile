@@ -16,6 +16,8 @@ SRC := \
 	src/protocol.c \
 	src/runtime_containerd_stub.c \
 	src/runtime_memory.c \
+	src/session.c \
+	src/stream_device.c \
 	src/transport_device.c \
 	src/transport_stub.c
 
@@ -39,19 +41,23 @@ $(TEST_BIN): tests/test_agent.c \
 	src/protocol.c \
 	src/runtime_containerd_stub.c \
 	src/runtime_memory.c \
+	src/session.c \
+	src/stream_device.c \
 	src/transport_device.c \
 	src/transport_stub.c
 	$(CC) $(BASE_CFLAGS) $(CFLAGS) -o $@ \
 		tests/test_agent.c \
 		src/agent.c \
-		src/config.c \
-		src/protocol.c \
-		src/runtime_containerd_stub.c \
-		src/runtime_memory.c \
-		src/transport_device.c \
-		src/transport_stub.c \
-		$(LDFLAGS) \
-		$(LDLIBS)
+			src/config.c \
+			src/protocol.c \
+			src/runtime_containerd_stub.c \
+			src/runtime_memory.c \
+			src/session.c \
+			src/stream_device.c \
+			src/transport_device.c \
+			src/transport_stub.c \
+			$(LDFLAGS) \
+			$(LDLIBS)
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)

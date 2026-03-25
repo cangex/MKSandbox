@@ -19,6 +19,10 @@
 #define MKRING_CONTAINER_OP_REMOVE               4U
 #define MKRING_CONTAINER_OP_STATUS               5U
 #define MKRING_CONTAINER_OP_READ_LOG             6U
+#define MKRING_CONTAINER_OP_EXEC_TTY_PREPARE     7U
+#define MKRING_CONTAINER_OP_EXEC_TTY_START       8U
+#define MKRING_CONTAINER_OP_EXEC_TTY_RESIZE      9U
+#define MKRING_CONTAINER_OP_EXEC_TTY_CLOSE       10U
 
 #define MKRING_CONTAINER_STATE_UNKNOWN           0U
 #define MKRING_CONTAINER_STATE_CREATED           1U
@@ -108,6 +112,38 @@ struct mkring_container_read_log_response {
 	char data[MKRING_CONTAINER_MAX_LOG_CHUNK];
 } __attribute__((packed));
 
+struct mkring_container_exec_tty_prepare_request {
+	char kernel_id[MKRING_CONTAINER_MAX_KERNEL_ID];
+	char container_id[MKRING_CONTAINER_MAX_CONTAINER_ID];
+	uint32_t argv_count;
+	uint8_t tty;
+	uint8_t stdin_enabled;
+	uint8_t stdout_enabled;
+	uint8_t stderr_enabled;
+	char argv[MKRING_CONTAINER_MAX_ARGV][MKRING_CONTAINER_MAX_ARG_LEN];
+} __attribute__((packed));
+
+struct mkring_container_exec_tty_prepare_response {
+	char session_id[MKRING_CONTAINER_MAX_CONTAINER_ID];
+} __attribute__((packed));
+
+struct mkring_container_exec_tty_start_request {
+	char kernel_id[MKRING_CONTAINER_MAX_KERNEL_ID];
+	char session_id[MKRING_CONTAINER_MAX_CONTAINER_ID];
+} __attribute__((packed));
+
+struct mkring_container_exec_tty_resize_request {
+	char kernel_id[MKRING_CONTAINER_MAX_KERNEL_ID];
+	char session_id[MKRING_CONTAINER_MAX_CONTAINER_ID];
+	uint32_t width;
+	uint32_t height;
+} __attribute__((packed));
+
+struct mkring_container_exec_tty_close_request {
+	char kernel_id[MKRING_CONTAINER_MAX_KERNEL_ID];
+	char session_id[MKRING_CONTAINER_MAX_CONTAINER_ID];
+} __attribute__((packed));
+
 struct mkring_container_error_payload {
 	int32_t errno_value;
 	char message[MKRING_CONTAINER_MAX_ERROR_MSG];
@@ -122,6 +158,11 @@ union mkring_container_payload {
 	struct mkring_container_status_response status_resp;
 	struct mkring_container_read_log_request read_log_req;
 	struct mkring_container_read_log_response read_log_resp;
+	struct mkring_container_exec_tty_prepare_request exec_tty_prepare_req;
+	struct mkring_container_exec_tty_prepare_response exec_tty_prepare_resp;
+	struct mkring_container_exec_tty_start_request exec_tty_start_req;
+	struct mkring_container_exec_tty_resize_request exec_tty_resize_req;
+	struct mkring_container_exec_tty_close_request exec_tty_close_req;
 	struct mkring_container_error_payload error;
 } __attribute__((packed));
 

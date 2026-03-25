@@ -90,6 +90,29 @@ type bridgeReadLogResponse struct {
 	Data       []byte `json:"data,omitempty"`
 }
 
+type bridgeExecTTYPrepareRequest struct {
+	KernelID string   `json:"kernel_id"`
+	Command  []string `json:"command"`
+	TTY      bool     `json:"tty"`
+	Stdin    bool     `json:"stdin"`
+	Stdout   bool     `json:"stdout"`
+	Stderr   bool     `json:"stderr"`
+}
+
+type bridgeExecTTYPrepareResponse struct {
+	SessionID string `json:"session_id"`
+}
+
+type bridgeExecTTYSessionRequest struct {
+	KernelID string `json:"kernel_id"`
+}
+
+type bridgeExecTTYResizeRequest struct {
+	KernelID string `json:"kernel_id"`
+	Width    uint32 `json:"width"`
+	Height   uint32 `json:"height"`
+}
+
 type bridgeErrorResponse struct {
 	Error string `json:"error"`
 }
@@ -192,6 +215,22 @@ func (c errorClient) ContainerStatus(_ context.Context, _ string) (*ContainerSta
 
 func (c errorClient) ReadLog(_ context.Context, _ string, _ uint64, _ int) (*LogChunk, error) {
 	return nil, c.err
+}
+
+func (c errorClient) ExecTTYPrepare(_ context.Context, _ ExecTTYRequest) (*ExecTTYPrepareResult, error) {
+	return nil, c.err
+}
+
+func (c errorClient) ExecTTYStart(_ context.Context, _ ExecTTYStartRequest) error {
+	return c.err
+}
+
+func (c errorClient) ExecTTYResize(_ context.Context, _ ExecTTYResizeRequest) error {
+	return c.err
+}
+
+func (c errorClient) ExecTTYClose(_ context.Context, _ ExecTTYCloseRequest) error {
+	return c.err
 }
 
 func (c *mkringBridgeClient) basePath() string {
@@ -352,4 +391,40 @@ func (c *mkringBridgeClient) ReadLog(ctx context.Context, containerID string, of
 		NextOffset: resp.NextOffset,
 		EOF:        resp.EOF,
 	}, nil
+}
+
+func (c *mkringBridgeClient) ExecTTYPrepare(ctx context.Context, req ExecTTYRequest) (*ExecTTYPrepareResult, error) {
+	body := bridgeExecTTYPrepareRequest{
+		KernelID: c.kernelID,
+		Command:  append([]string(nil), req.Command...),
+		TTY:      req.TTY,
+		Stdin:    req.Stdin,
+		Stdout:   req.Stdout,
+		Stderr:   req.Stderr,
+	}
+	var resp bridgeExecTTYPrepareResponse
+	path := c.basePath() + "/containers/" + url.PathEscape(req.ContainerID) + "/exec-tty"
+	if err := c.doJSON(ctx, http.MethodPost, path, body, &resp); err != nil {
+		return nil, err
+	}
+	return &ExecTTYPrepareResult{SessionID: resp.SessionID}, nil
+}
+
+func (c *mkringBridgeClient) ExecTTYStart(ctx context.Context, req ExecTTYStartRequest) error {
+	path := c.basePath() + "/sessions/" + url.PathEscape(req.SessionID) + "/start"
+	return c.doJSON(ctx, http.MethodPost, path, bridgeExecTTYSessionRequest{KernelID: c.kernelID}, nil)
+}
+
+func (c *mkringBridgeClient) ExecTTYResize(ctx context.Context, req ExecTTYResizeRequest) error {
+	path := c.basePath() + "/sessions/" + url.PathEscape(req.SessionID) + "/resize"
+	return c.doJSON(ctx, http.MethodPost, path, bridgeExecTTYResizeRequest{
+		KernelID: c.kernelID,
+		Width:    req.Width,
+		Height:   req.Height,
+	}, nil)
+}
+
+func (c *mkringBridgeClient) ExecTTYClose(ctx context.Context, req ExecTTYCloseRequest) error {
+	path := c.basePath() + "/sessions/" + url.PathEscape(req.SessionID) + "/close"
+	return c.doJSON(ctx, http.MethodPost, path, bridgeExecTTYSessionRequest{KernelID: c.kernelID}, nil)
 }

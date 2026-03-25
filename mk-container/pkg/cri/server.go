@@ -12,6 +12,7 @@ import (
 
 	"mk-container/pkg/model"
 	mkrt "mk-container/pkg/runtime"
+	"mk-container/pkg/streaming"
 )
 
 type Server struct {
@@ -21,15 +22,17 @@ type Server struct {
 	runtimeName    string
 	runtimeVersion string
 	engine         *mkrt.Engine
+	streaming      *streaming.Server
 }
 
 const defaultStopContainerTimeout = 30 * time.Second
 
-func NewServer(engine *mkrt.Engine, runtimeName, runtimeVersion string) *Server {
+func NewServer(engine *mkrt.Engine, runtimeName, runtimeVersion string, execStreaming *streaming.Server) *Server {
 	return &Server{
 		runtimeName:    runtimeName,
 		runtimeVersion: runtimeVersion,
 		engine:         engine,
+		streaming:      execStreaming,
 	}
 }
 
@@ -250,6 +253,50 @@ func (s *Server) StopContainer(ctx context.Context, req *runtimeapi.StopContaine
 		return nil, status.Errorf(codes.Internal, "stop container failed: %v", err)
 	}
 	return &runtimeapi.StopContainerResponse{}, nil
+}
+
+func (s *Server) Exec(ctx context.Context, req *runtimeapi.ExecRequest) (*runtimeapi.ExecResponse, error) {
+	if req.GetContainerId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "containerId is required")
+	}
+	if len(req.GetCmd()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "cmd is required")
+	}
+	if !req.GetTty() {
+		return nil, status.Error(codes.Unimplemented, "non-tty exec is not implemented")
+	}
+	if s.streaming == nil {
+		return nil, status.Error(codes.Unimplemented, "tty exec streaming server is not configured")
+	}
+
+	session, err := s.engine.ExecTTYPrepare(ctx, req.GetContainerId(), req.GetCmd(), req.GetTty(), req.GetStdin(), req.GetStdout(), req.GetStderr())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "prepare tty exec failed: %v", err)
+	}
+
+	token, err := s.streaming.RegisterTTYSession(streaming.Session{
+		ID:           session.SessionID,
+		ContainerID:  session.ContainerID,
+		KernelID:     session.KernelID,
+		PeerKernelID: session.PeerKernelID,
+		TTY:          true,
+		Start: func(inner context.Context) error {
+			return s.engine.ExecTTYStart(inner, session)
+		},
+		ResizeFn: func(inner context.Context, ev streaming.ResizeEvent) error {
+			return s.engine.ExecTTYResize(inner, session, ev.Width, ev.Height)
+		},
+		CloseFn: func(inner context.Context) error {
+			return s.engine.ExecTTYClose(inner, session)
+		},
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "register tty exec session failed: %v", err)
+	}
+
+	return &runtimeapi.ExecResponse{
+		Url: s.streaming.ExecURL(token),
+	}, nil
 }
 
 func (s *Server) RemoveContainer(ctx context.Context, req *runtimeapi.RemoveContainerRequest) (*runtimeapi.RemoveContainerResponse, error) {

@@ -52,6 +52,7 @@ type readyClient struct {
 	stopCode   int32
 	stopStart  chan struct{}
 	stopBlock  chan struct{}
+	stopTimeout time.Duration
 	mu         sync.Mutex
 	stopped    bool
 }
@@ -74,7 +75,7 @@ func (c *readyClient) StartContainer(_ context.Context, _ string) error {
 	return nil
 }
 
-func (c *readyClient) StopContainer(_ context.Context, _ string, _ time.Duration) (int32, error) {
+func (c *readyClient) StopContainer(_ context.Context, _ string, timeout time.Duration) (int32, error) {
 	if c.stopStart != nil {
 		select {
 		case c.stopStart <- struct{}{}:
@@ -82,6 +83,7 @@ func (c *readyClient) StopContainer(_ context.Context, _ string, _ time.Duration
 		}
 	}
 	c.mu.Lock()
+	c.stopTimeout = timeout
 	c.stopped = true
 	c.mu.Unlock()
 	if c.stopBlock != nil {
@@ -127,6 +129,22 @@ func (c *readyClient) ReadLog(_ context.Context, _ string, offset uint64, _ int)
 		return &cp, nil
 	}
 	return &agent.LogChunk{NextOffset: offset, EOF: true}, nil
+}
+
+func (c *readyClient) ExecTTYPrepare(_ context.Context, _ agent.ExecTTYRequest) (*agent.ExecTTYPrepareResult, error) {
+	return nil, agent.ErrNotImplemented
+}
+
+func (c *readyClient) ExecTTYStart(_ context.Context, _ agent.ExecTTYStartRequest) error {
+	return agent.ErrNotImplemented
+}
+
+func (c *readyClient) ExecTTYResize(_ context.Context, _ agent.ExecTTYResizeRequest) error {
+	return agent.ErrNotImplemented
+}
+
+func (c *readyClient) ExecTTYClose(_ context.Context, _ agent.ExecTTYCloseRequest) error {
+	return agent.ErrNotImplemented
 }
 
 type readyFactory struct {
@@ -530,4 +548,84 @@ func TestStopContainerBlocksAutoCleanupUntilStopReturns(t *testing.T) {
 	waitForCondition(t, 2*time.Second, func() bool {
 		return len(km.stopCalls) == 1
 	})
+}
+
+func TestCleanupExitedContainerSkipsCanceledContext(t *testing.T) {
+	client := &readyClient{
+		status: &agent.ContainerStatus{
+			State:      "EXITED",
+			ExitCode:   0,
+			FinishedAt: time.Now().UTC(),
+		},
+		logChunk: &agent.LogChunk{EOF: true},
+	}
+	e, km, _ := newTestEngineWithFactory(t, &readyFactory{client: client})
+	ctx := context.Background()
+
+	pod, err := e.RunPod(ctx, PodSpec{Name: "p1", Namespace: "default", UID: "u1"})
+	if err != nil {
+		t.Fatalf("run pod: %v", err)
+	}
+	ctr, err := e.CreateContainer(ctx, ContainerSpec{
+		PodID:   pod.ID,
+		Name:    "c1",
+		Image:   "busybox",
+		LogPath: filepath.Join(t.TempDir(), "ctr.log"),
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	if err := e.StartContainer(ctx, ctr.ID); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if cleaned := e.cleanupExitedContainer(cancelCtx, ctr.ID); cleaned {
+		t.Fatalf("expected canceled cleanup to return false")
+	}
+	if len(km.stopCalls) != 0 {
+		t.Fatalf("expected canceled cleanup to skip StopPod, got %d stop kernel calls", len(km.stopCalls))
+	}
+}
+
+func TestStopContainerLeavesResponseBudgetBeforeContextDeadline(t *testing.T) {
+	client := &readyClient{}
+	e, _, _ := newTestEngineWithFactory(t, &readyFactory{client: client})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pod, err := e.RunPod(ctx, PodSpec{Name: "p1", Namespace: "default", UID: "u1"})
+	if err != nil {
+		t.Fatalf("run pod: %v", err)
+	}
+	ctr, err := e.CreateContainer(ctx, ContainerSpec{
+		PodID:   pod.ID,
+		Name:    "c1",
+		Image:   "busybox",
+		LogPath: filepath.Join(t.TempDir(), "ctr.log"),
+	})
+	if err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+	if err := e.StartContainer(ctx, ctr.ID); err != nil {
+		t.Fatalf("start container: %v", err)
+	}
+
+	if err := e.StopContainer(ctx, ctr.ID, 30*time.Second); err != nil {
+		t.Fatalf("stop container: %v", err)
+	}
+
+	client.mu.Lock()
+	got := client.stopTimeout
+	client.mu.Unlock()
+
+	if got <= 0 {
+		t.Fatalf("expected forwarded stop timeout to be positive")
+	}
+	if got >= 30*time.Second {
+		t.Fatalf("expected forwarded stop timeout to leave response budget, got %v", got)
+	}
 }

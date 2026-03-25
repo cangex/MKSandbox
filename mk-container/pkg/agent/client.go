@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+var ErrNotImplemented = errors.New("not implemented")
 
 type ContainerSpec struct {
 	PodID       string
@@ -31,6 +34,33 @@ type LogChunk struct {
 	EOF        bool
 }
 
+type ExecTTYRequest struct {
+	ContainerID string
+	Command     []string
+	TTY         bool
+	Stdin       bool
+	Stdout      bool
+	Stderr      bool
+}
+
+type ExecTTYPrepareResult struct {
+	SessionID string
+}
+
+type ExecTTYStartRequest struct {
+	SessionID string
+}
+
+type ExecTTYResizeRequest struct {
+	SessionID string
+	Width     uint32
+	Height    uint32
+}
+
+type ExecTTYCloseRequest struct {
+	SessionID string
+}
+
 type Client interface {
 	WaitReady(ctx context.Context) error
 	CreateContainer(ctx context.Context, spec ContainerSpec) (string, string, error)
@@ -39,6 +69,10 @@ type Client interface {
 	RemoveContainer(ctx context.Context, containerID string) error
 	ContainerStatus(ctx context.Context, containerID string) (*ContainerStatus, error)
 	ReadLog(ctx context.Context, containerID string, offset uint64, maxBytes int) (*LogChunk, error)
+	ExecTTYPrepare(ctx context.Context, req ExecTTYRequest) (*ExecTTYPrepareResult, error)
+	ExecTTYStart(ctx context.Context, req ExecTTYStartRequest) error
+	ExecTTYResize(ctx context.Context, req ExecTTYResizeRequest) error
+	ExecTTYClose(ctx context.Context, req ExecTTYCloseRequest) error
 }
 
 type Factory interface {

@@ -160,6 +160,40 @@ static int mkga_memory_read_log(struct mkga_runtime *runtime,
 	return 0;
 }
 
+static int mkga_memory_exec_tty_prepare(struct mkga_runtime *runtime,
+					const struct mkga_exec_tty_prepare_req *req,
+					struct mkga_exec_tty_prepare_resp *resp)
+{
+	(void)runtime;
+	(void)req;
+	(void)resp;
+	return -ENOSYS;
+}
+
+static int mkga_memory_exec_tty_start(struct mkga_runtime *runtime,
+				      const struct mkga_exec_session_control_req *req)
+{
+	(void)runtime;
+	(void)req;
+	return -ENOSYS;
+}
+
+static int mkga_memory_exec_tty_resize(struct mkga_runtime *runtime,
+				       const struct mkga_exec_tty_resize_req *req)
+{
+	(void)runtime;
+	(void)req;
+	return -ENOSYS;
+}
+
+static int mkga_memory_exec_tty_close(struct mkga_runtime *runtime,
+				      const struct mkga_exec_session_control_req *req)
+{
+	(void)runtime;
+	(void)req;
+	return -ENOSYS;
+}
+
 static int mkga_memory_remove_container(struct mkga_runtime *runtime,
 					const struct mkga_container_control_req *req)
 {
@@ -199,6 +233,10 @@ static const struct mkga_runtime_ops mkga_memory_ops = {
 	.remove_container = mkga_memory_remove_container,
 	.status_container = mkga_memory_status_container,
 	.read_log = mkga_memory_read_log,
+	.exec_tty_prepare = mkga_memory_exec_tty_prepare,
+	.exec_tty_start = mkga_memory_exec_tty_start,
+	.exec_tty_resize = mkga_memory_exec_tty_resize,
+	.exec_tty_close = mkga_memory_exec_tty_close,
 	.destroy = mkga_memory_destroy,
 };
 
@@ -279,6 +317,55 @@ int mkga_runtime_read_log(struct mkga_runtime *runtime,
 		return -EINVAL;
 	}
 	return runtime->ops->read_log(runtime, req, resp);
+}
+
+int mkga_runtime_exec_tty_prepare(struct mkga_runtime *runtime,
+				  const struct mkga_exec_tty_prepare_req *req,
+				  struct mkga_exec_tty_prepare_resp *resp)
+{
+	if (!runtime || !runtime->ops || !runtime->ops->exec_tty_prepare || !req || !resp) {
+		return -EINVAL;
+	}
+	if (!runtime->impl) {
+		return -EINVAL;
+	}
+	return runtime->ops->exec_tty_prepare(runtime, req, resp);
+}
+
+int mkga_runtime_exec_tty_start(struct mkga_runtime *runtime,
+				const struct mkga_exec_session_control_req *req)
+{
+	if (!runtime || !runtime->ops || !runtime->ops->exec_tty_start || !req) {
+		return -EINVAL;
+	}
+	if (!runtime->impl) {
+		return -EINVAL;
+	}
+	return runtime->ops->exec_tty_start(runtime, req);
+}
+
+int mkga_runtime_exec_tty_resize(struct mkga_runtime *runtime,
+				 const struct mkga_exec_tty_resize_req *req)
+{
+	if (!runtime || !runtime->ops || !runtime->ops->exec_tty_resize || !req) {
+		return -EINVAL;
+	}
+	if (!runtime->impl) {
+		return -EINVAL;
+	}
+	return runtime->ops->exec_tty_resize(runtime, req);
+}
+
+int mkga_runtime_exec_tty_close(struct mkga_runtime *runtime,
+				const struct mkga_exec_session_control_req *req)
+{
+	if (!runtime || !runtime->ops || !runtime->ops->exec_tty_close || !req) {
+		return -EINVAL;
+	}
+	if (!runtime->impl) {
+		return -EINVAL;
+	}
+	return runtime->ops->exec_tty_close(runtime, req);
 }
 
 void mkga_runtime_destroy(struct mkga_runtime *runtime)

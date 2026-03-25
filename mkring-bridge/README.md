@@ -1,55 +1,54 @@
 # mkring-bridge
 
-`mkring-bridge` 是 host 侧的控制面桥接骨架，职责是把 `mkcri` 的本地
-HTTP/Unix-socket 请求翻译成发往目标 sub-kernel 的 `mkring` 控制消息。
+`mkring-bridge` is the host-side control-plane bridge. It translates local `mkcri`
+HTTP/Unix-socket requests into `mkring` control messages sent to a target
+sub-kernel.
 
-当前目录提供：
+The tree currently provides:
 
-- 面向 `mkcri` 的本地 HTTP API
-- host -> guest 的控制消息格式
-- 支持分片的 frame 结构定义
-- `Transport` 抽象，方便后续接用户态/内核态的 `mkring` 桥
-- 一个 `stub` transport，便于先联调 HTTP 协议
+- a local HTTP API for `mkcri`,
+- host -> guest control message definitions,
+- transport abstractions for control-plane round trips,
+- a host-side device transport backed by `/dev/mkring_container_bridge`,
+- support for TTY exec control operations (`prepare/start/resize/close`).
 
-内核侧现在已经补了一层配套模块：
+The matching kernel-side modules live under `mkring/`:
 
-- `mkring/mkring_container_bridge.c`
-- device: `/dev/mkring_container_bridge`
-- UAPI: `mkring/mkring_container.h`
+- `mkring_container_bridge.c`
+- `mkring_stream_bridge.c`
 
-## 对外 API
+## External API
 
-与 `mk-container/pkg/agent/mkring_bridge_client.go` 对齐：
+Aligned with `mk-container/pkg/agent/mkring_bridge_client.go`:
 
 - `POST /v1/kernels/{peerID}/wait-ready`
 - `POST /v1/kernels/{peerID}/containers`
 - `POST /v1/kernels/{peerID}/containers/{containerID}/start`
 - `POST /v1/kernels/{peerID}/containers/{containerID}/stop`
 - `POST /v1/kernels/{peerID}/containers/{containerID}/remove`
+- `POST /v1/kernels/{peerID}/containers/{containerID}/status`
+- `POST /v1/kernels/{peerID}/containers/{containerID}/read-log`
+- `POST /v1/kernels/{peerID}/containers/{containerID}/exec-tty-prepare`
+- `POST /v1/kernels/{peerID}/sessions/{sessionID}/start`
+- `POST /v1/kernels/{peerID}/sessions/{sessionID}/resize`
+- `POST /v1/kernels/{peerID}/sessions/{sessionID}/close`
 
-## 控制消息格式
+## Control Message Model
 
-逻辑消息单位：`internal/protocol.Envelope`
+Logical message unit: `internal/protocol.Envelope`
 
-- `id`: 请求 ID
+- `id`: request id
 - `kind`: `request` / `response`
-- `operation`: `create_container` / `start_container` / `stop_container` / `remove_container`
-- `peer_kernel_id`: 目标 sub-kernel 的 `mkring.kernel_id`
-- `kernel_id`: `mk-container` 内部的 opaque kernel ID
-- `payload`: 具体操作参数
-- `error`: 错误体
+- `operation`: container control or TTY exec control operation
+- `peer_kernel_id`: target sub-kernel `mkring.kernel_id`
+- `kernel_id`: opaque kernel id used inside `mk-container`
+- `payload`: operation-specific parameters
+- `error`: structured error body
 
-传输分片单位：`internal/protocol.Frame`
+The bridge converts these logical operations into kernel bridge calls on
+`/dev/mkring_container_bridge`.
 
-- `message_id`
-- `sequence`
-- `final`
-- `payload`
-
-这层是为了适配 `mkring` 的固定消息槽大小；后续真实实现只需要把
-`Envelope <-> []Frame` 接到内核态桥接上即可。
-
-## 运行
+## Running
 
 ```bash
 cd mkring-bridge
@@ -57,13 +56,31 @@ go test ./...
 go run ./cmd/mkring-bridge
 ```
 
-默认监听：
+By default it listens on:
 
 - Unix socket: `/run/mk-container/mkring-bridge.sock`
 - transport driver: `stub`
 
-## 下一步
+For the real host path, configure the device transport and point it at
+`/dev/mkring_container_bridge`.
 
-1. 实现真正的 host device transport，把 `Transport.RoundTrip()` 接到 `MKRING_CONTAINER_IOC_CALL`
-2. 在首次访问 peer 前补 `MKRING_CONTAINER_IOC_WAIT_READY`
-3. 做 frame 分片、超时和重试策略
+## Current Status
+
+What is implemented:
+
+- host-side control-plane bridge for the container lifecycle,
+- wait-ready support,
+- synchronous control round trips through the kernel bridge,
+- status and log-read operations,
+- TTY exec control-plane requests.
+
+What is still separate from this binary:
+
+- the stream data-plane itself,
+- the CRI-facing TTY streaming endpoint in `mk-container/pkg/streaming`.
+
+## Next Steps
+
+1. Keep hardening error mapping and timeout behavior.
+2. Continue simplifying the bridge/control protocol now that the TTY exec path is working end to end.
+3. Add more transport and integration tests for exec session control.

@@ -84,6 +84,14 @@ const char *mkga_operation_name(enum mkga_operation operation)
 		return "status_container";
 	case MKGA_OP_READ_LOG:
 		return "read_log";
+	case MKGA_OP_EXEC_TTY_PREPARE:
+		return "exec_tty_prepare";
+	case MKGA_OP_EXEC_TTY_START:
+		return "exec_tty_start";
+	case MKGA_OP_EXEC_TTY_RESIZE:
+		return "exec_tty_resize";
+	case MKGA_OP_EXEC_TTY_CLOSE:
+		return "exec_tty_close";
 	default:
 		return "invalid";
 	}

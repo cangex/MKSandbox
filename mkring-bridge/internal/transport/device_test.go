@@ -216,3 +216,200 @@ func TestDeviceTransportRoundTripCreate(t *testing.T) {
 		t.Fatalf("device file was not closed")
 	}
 }
+
+func TestDeviceTransportRoundTripExecTTYPrepare(t *testing.T) {
+	file := &fakeDeviceFile{fd: 63}
+	transport := NewDeviceTransport("/dev/mkring_container_bridge")
+	transport.open = func(path string) (deviceFile, error) {
+		if path != "/dev/mkring_container_bridge" {
+			t.Fatalf("unexpected device path: %s", path)
+		}
+		return file, nil
+	}
+	transport.ioctl = func(fd uintptr, req uintptr, arg uintptr) error {
+		if fd != file.fd {
+			t.Fatalf("unexpected fd: %d", fd)
+		}
+		if req != ioctlCall {
+			t.Fatalf("unexpected ioctl request: %#x", req)
+		}
+
+		buf := argBytes(arg, containerCallSize)
+		var call containerCall
+		if err := decodeStruct(buf, &call); err != nil {
+			t.Fatalf("decode ioctl call: %v", err)
+		}
+
+		if call.Request.Header.Operation != mkringContainerOpExecTTYPrepare {
+			t.Fatalf("unexpected request operation: %d", call.Request.Header.Operation)
+		}
+		if call.Request.Header.PayloadLen != containerExecTTYPrepareRequestSize {
+			t.Fatalf("unexpected request payload length: %d", call.Request.Header.PayloadLen)
+		}
+
+		var execReq containerExecTTYPrepareRequest
+		if err := decodeStruct(call.Request.Payload[:containerExecTTYPrepareRequestSize], &execReq); err != nil {
+			t.Fatalf("decode exec-tty-prepare request: %v", err)
+		}
+		if got := cString(execReq.KernelID[:]); got != "kernel-a" {
+			t.Fatalf("unexpected kernel id: %q", got)
+		}
+		if got := cString(execReq.ContainerID[:]); got != "ctr-a" {
+			t.Fatalf("unexpected container id: %q", got)
+		}
+		if execReq.ArgvCount != 2 {
+			t.Fatalf("unexpected argv count: %d", execReq.ArgvCount)
+		}
+		if execReq.TTY != 1 || execReq.StdinEnabled != 1 || execReq.StdoutEnabled != 1 {
+			t.Fatalf("unexpected tty stream flags: tty=%d stdin=%d stdout=%d",
+				execReq.TTY, execReq.StdinEnabled, execReq.StdoutEnabled)
+		}
+		if execReq.StderrEnabled != 0 {
+			t.Fatalf("unexpected stderr flag: %d", execReq.StderrEnabled)
+		}
+		if got := cString(execReq.Argv[0][:]); got != "sh" {
+			t.Fatalf("unexpected argv[0]: %q", got)
+		}
+		if got := cString(execReq.Argv[1][:]); got != "-l" {
+			t.Fatalf("unexpected argv[1]: %q", got)
+		}
+
+		execResp := containerExecTTYPrepareResponse{}
+		if err := copyCString(execResp.SessionID[:], "exec-session-1"); err != nil {
+			t.Fatalf("copy session id: %v", err)
+		}
+		payload, err := encodeStruct(execResp, containerExecTTYPrepareResponseSize)
+		if err != nil {
+			t.Fatalf("encode exec-tty-prepare response: %v", err)
+		}
+
+		call.Status = 0
+		call.Response.Header = containerHeader{
+			Magic:      mkringContainerMagic,
+			Version:    mkringContainerVersion,
+			Channel:    mkringContainerChannel,
+			Kind:       mkringContainerKindResponse,
+			Operation:  mkringContainerOpExecTTYPrepare,
+			PayloadLen: containerExecTTYPrepareResponseSize,
+		}
+		copy(call.Response.Payload[:], payload)
+
+		out, err := encodeStruct(call, containerCallSize)
+		if err != nil {
+			t.Fatalf("encode ioctl response: %v", err)
+		}
+		copy(buf, out)
+		return nil
+	}
+
+	req, err := protocol.NewRequest("req-exec-1", 9, "kernel-a", protocol.OpExecTTYPrepare, protocol.ExecTTYPreparePayload{
+		KernelID:    "kernel-a",
+		ContainerID: "ctr-a",
+		Command:     []string{"sh", "-l"},
+		TTY:         true,
+		Stdin:       true,
+		Stdout:      true,
+		Stderr:      false,
+	})
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	resp, err := transport.RoundTrip(context.Background(), 9, req)
+	if err != nil {
+		t.Fatalf("RoundTrip returned error: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected response error: %+v", resp.Error)
+	}
+
+	var result protocol.ExecTTYPrepareResult
+	if err := protocol.DecodePayload(resp, &result); err != nil {
+		t.Fatalf("decode response payload: %v", err)
+	}
+	if result.SessionID != "exec-session-1" {
+		t.Fatalf("unexpected session id: %q", result.SessionID)
+	}
+	if !file.closed {
+		t.Fatalf("device file was not closed")
+	}
+}
+
+func TestDeviceTransportRoundTripExecTTYStart(t *testing.T) {
+	file := &fakeDeviceFile{fd: 64}
+	transport := NewDeviceTransport("/dev/mkring_container_bridge")
+	transport.open = func(path string) (deviceFile, error) {
+		if path != "/dev/mkring_container_bridge" {
+			t.Fatalf("unexpected device path: %s", path)
+		}
+		return file, nil
+	}
+	transport.ioctl = func(fd uintptr, req uintptr, arg uintptr) error {
+		if fd != file.fd {
+			t.Fatalf("unexpected fd: %d", fd)
+		}
+		if req != ioctlCall {
+			t.Fatalf("unexpected ioctl request: %#x", req)
+		}
+
+		buf := argBytes(arg, containerCallSize)
+		var call containerCall
+		if err := decodeStruct(buf, &call); err != nil {
+			t.Fatalf("decode ioctl call: %v", err)
+		}
+
+		if call.Request.Header.Operation != mkringContainerOpExecTTYStart {
+			t.Fatalf("unexpected request operation: %d", call.Request.Header.Operation)
+		}
+		if call.Request.Header.PayloadLen != containerExecTTYStartRequestSize {
+			t.Fatalf("unexpected request payload length: %d", call.Request.Header.PayloadLen)
+		}
+
+		var startReq containerExecTTYStartRequest
+		if err := decodeStruct(call.Request.Payload[:containerExecTTYStartRequestSize], &startReq); err != nil {
+			t.Fatalf("decode exec-tty-start request: %v", err)
+		}
+		if got := cString(startReq.KernelID[:]); got != "kernel-a" {
+			t.Fatalf("unexpected kernel id: %q", got)
+		}
+		if got := cString(startReq.SessionID[:]); got != "exec-session-1" {
+			t.Fatalf("unexpected session id: %q", got)
+		}
+
+		call.Status = 0
+		call.Response.Header = containerHeader{
+			Magic:      mkringContainerMagic,
+			Version:    mkringContainerVersion,
+			Channel:    mkringContainerChannel,
+			Kind:       mkringContainerKindResponse,
+			Operation:  mkringContainerOpExecTTYStart,
+			PayloadLen: 0,
+		}
+
+		out, err := encodeStruct(call, containerCallSize)
+		if err != nil {
+			t.Fatalf("encode ioctl response: %v", err)
+		}
+		copy(buf, out)
+		return nil
+	}
+
+	req, err := protocol.NewRequest("req-exec-start-1", 9, "kernel-a", protocol.OpExecTTYStart, protocol.ExecTTYStartPayload{
+		KernelID:  "kernel-a",
+		SessionID: "exec-session-1",
+	})
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	resp, err := transport.RoundTrip(context.Background(), 9, req)
+	if err != nil {
+		t.Fatalf("RoundTrip returned error: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected response error: %+v", resp.Error)
+	}
+	if !file.closed {
+		t.Fatalf("device file was not closed")
+	}
+}

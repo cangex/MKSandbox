@@ -31,6 +31,16 @@ func (t *StubTransport) RoundTrip(_ context.Context, _ uint16, req protocol.Enve
 		return protocol.NewResponse(req, protocol.StopContainerResult{ExitCode: 0})
 	case protocol.OpRemoveContainer:
 		return protocol.NewResponse(req, struct{}{})
+	case protocol.OpExecTTYPrepare:
+		return protocol.NewResponse(req, protocol.ExecTTYPrepareResult{
+			SessionID: "stub-exec-" + req.ID,
+		})
+	case protocol.OpExecTTYStart:
+		return protocol.NewResponse(req, struct{}{})
+	case protocol.OpExecTTYResize:
+		return protocol.NewResponse(req, struct{}{})
+	case protocol.OpExecTTYClose:
+		return protocol.NewResponse(req, struct{}{})
 	default:
 		return protocol.Envelope{}, fmt.Errorf("unsupported op: %s", req.Operation)
 	}

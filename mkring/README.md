@@ -1,53 +1,57 @@
 # mkring (built-in)
 
-`mkring` 是面向 multikernel 场景的 Linux 内核内置通信组件（不是设备，不通过 `insmod` 加载）。
+`mkring` is the in-kernel communication substrate for the multikernel environment. It is a built-in kernel component, not a user-space program and not a standalone module loaded by itself.
 
-核心特性：
+Core properties:
 
-- 使用 vring 风格（`desc/avail/used`）组织共享内存队列。
-- 数据写入共享内存后，立即通过 IPI 通知目标 kernel。
-- 任意 kernel `i -> j`（`i != j`）都可通信，方向独立（`N x N` 队列）。
-- 初始化时通过 `request_mem_region("mkring-shm")` 在 `/proc/iomem` 注册共享内存区。
+- It uses a vring-like shared-memory queue layout (`desc/avail/used`).
+- Data is written into shared memory and then announced to the target kernel through IPI.
+- Any kernel `i -> j` (`i != j`) can communicate through an independent directional queue.
+- Initialization registers the shared-memory region in `/proc/iomem` with `request_mem_region("mkring-shm")`.
 
-## 文件说明
+## Files
 
-- [mkring.c](./mkring.c)：核心 ring + 通信实现
-- [mkring.h](./mkring.h)：对外接口（`mkring_init()`、`mkring_send()` 等）
-- [mkring_container.h](./mkring_container.h)：container 控制面的消息头、payload 和 ioctl 定义
-- [mkring_container_bridge.c](./mkring_container_bridge.c)：参考 `mkring_test.c` 风格实现的 container bridge 模块
-- [init_mk.c](./init_mk.c)：kernel cmdline 参数解析 + init 阶段调用入口
-- [Makefile](./Makefile)：内核树 `Kbuild` 片段（`obj-y`）
+- [mkring.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring.c): core ring and communication implementation
+- [mkring.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring.h): exported APIs such as `mkring_init()` and `mkring_send()`
+- [mkring_container.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container.h): control-plane message headers, payloads, and ioctl definitions
+- [mkring_stream.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_stream.h): stream data-plane message headers and payloads
+- [mkring_container_bridge.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container_bridge.c): host/guest control-plane bridge module
+- [mkring_stream_bridge.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_stream_bridge.c): host/guest stream bridge module
+- [init_mk.c](/Users/yezhucan/Desktop/mk%20container/mkring/init_mk.c): kernel command-line parsing and built-in initialization entrypoint
+- [Makefile](/Users/yezhucan/Desktop/mk%20container/mkring/Makefile): kernel-tree Kbuild fragment
 
-## 初始化方式（内置）
+## Built-in Initialization Path
 
-`mkring` 不再使用 `module_param/module_init`，而是通过：
+`mkring` no longer uses `module_param/module_init` for the core transport. Instead:
 
-1. `init_mk.c` 解析 kernel command line 参数（`__setup`）
-2. 在 `subsys_initcall(init_mk)` 阶段调用 `mkring_init(&params)`
+1. `init_mk.c` parses kernel command-line parameters (`__setup`)
+2. `subsys_initcall(init_mk)` triggers `init_mk()`
+3. `init_mk()` builds `struct mkring_boot_params`
+4. `mkring_init(&params)` initializes the shared-memory transport
 
-如果你想在其他系统初始化阶段调用，移除 `subsys_initcall` 并手动调用 `init_mk()` 即可。
+If another platform wants a different initialization stage, remove `subsys_initcall` and call `init_mk()` manually.
 
-## kernel command line 参数
+## Kernel Command-Line Parameters
 
-`init_mk.c` 支持以下参数（前缀 `mkring.`）：
+`init_mk.c` supports the following `mkring.*` parameters:
 
-- `mkring.shm_phys=`（必填）
-- `mkring.shm_size=`（必填）
-- `mkring.kernel_id=`（必填）
-- `mkring.kernels=`（默认 `2`）
-- `mkring.desc_num=`（默认 `256`）
-- `mkring.msg_size=`（默认 `1024`）
-- `mkring.ipi_vector=`（默认 `0xF2`，发送 IPI 使用的向量号）
-- `mkring.ipi_dests=`（可选，逗号分隔 APIC 物理 ID 映射，按 `kernel_id` 下标排列）
-- `mkring.force_init=`（默认 `0`）
+- `mkring.shm_phys=` (required)
+- `mkring.shm_size=` (required)
+- `mkring.kernel_id=` (required)
+- `mkring.kernels=` (default: `2`)
+- `mkring.desc_num=` (default: `256`)
+- `mkring.msg_size=` (default: `1024`)
+- `mkring.ipi_vector=` (default: `0xF2`)
+- `mkring.ipi_dests=` (optional, comma-separated APIC physical id mapping by `kernel_id`)
+- `mkring.force_init=` (default: `0`)
 
-示例：
+Example:
 
 ```text
 mkring.shm_phys=0x90000000 mkring.shm_size=0x200000 mkring.kernel_id=1 mkring.kernels=4 mkring.desc_num=256 mkring.msg_size=1024 mkring.ipi_vector=0xF2 mkring.ipi_dests=0x10,0x20,0x30,0x40
 ```
 
-## API
+## Public API
 
 - `int mkring_init(const struct mkring_boot_params *params);`
 - `void mkring_exit(void);`
@@ -57,554 +61,348 @@ mkring.shm_phys=0x90000000 mkring.shm_size=0x200000 mkring.kernel_id=1 mkring.ke
 - `int mkring_register_ipi_notify(mkring_ipi_notify_t notify, void *priv);`
 - `int mkring_get_info(struct mkring_info *info);`
 - `void mkring_handle_ipi_all(void);`
-- `void mkring_ipi_interrupt(void);`（建议 IPI vector handler 调用）
+- `void mkring_ipi_interrupt(void);`
 
-## Container 控制面扩展
+## Control-Plane Extension
 
-为了支持 `mkcontainer -> sub-kernel -> containerd` 的控制链路，当前目录新增了一层专用协议：
+To support the `mkcri -> sub-kernel -> containerd` control chain, the tree includes a control-specific protocol:
 
-- `mkring_container.h`
-  定义了 container 专用消息头：
+- [mkring_container.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container.h)
+  - defines the container message header and payloads
   - `magic = MKRING_CONTAINER_MAGIC`
-  - `channel = MKRING_CONTAINER_CHANNEL`
+  - `channel = MKRING_CHANNEL_CONTAINER`
   - `kind = READY / REQUEST / RESPONSE`
-  - `operation = CREATE / START / STOP / REMOVE`
-- `mkring_container_bridge.c`
-  提供一个 loadable module，复用了 `mkring_test.c` 的思路：
-  - 通过 `mkring_register_rx_cb()` 为所有远端 peer 注册回调
-  - 中断上下文只做消息校验和入队
-  - worker 线程在进程上下文处理 `READY / REQUEST / RESPONSE`
-  - 通过 `/dev/mkring_container_bridge` 暴露 host/guest 用户态接口
+  - `operation = CREATE / START / STOP / REMOVE / STATUS / READ_LOG / EXEC_TTY_*`
+- [mkring_container_bridge.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container_bridge.c)
+  - provides the host/guest userspace-facing bridge module
+  - interrupt context only validates and queues work
+  - worker or process context handles READY / REQUEST / RESPONSE processing
+  - exposes `/dev/mkring_container_bridge`
 
-### 用户态接口
+### Userspace Interface
 
-`mkring_container_bridge` 的 miscdevice 使用 [mkring_container.h](./mkring_container.h) 里的 UAPI：
+`mkring_container_bridge` exposes the UAPI from [mkring_container.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container.h):
 
 - `MKRING_CONTAINER_IOC_WAIT_READY`
-  host 侧等待某个 sub-kernel 发来 `READY`
+  - host waits for a sub-kernel `READY`
 - `MKRING_CONTAINER_IOC_CALL`
-  host 侧发送一个 container `REQUEST` 并同步等待 `RESPONSE`
+  - host sends a container request and synchronously waits for a response
 - `MKRING_CONTAINER_IOC_SET_READY`
-  guest 侧在 `containerd` 启动成功后通知 host
+  - guest announces readiness after runtime startup
 - `read()`
-  guest 侧阻塞读取 host 发来的 `REQUEST`
+  - guest blocks waiting for host requests
 - `write()`
-  guest 侧把处理后的 `RESPONSE` 写回内核模块，再由模块发回 host
+  - guest writes a response back to the module, which sends it to the host
 
-### 典型加载方式
+### Typical Loading
 
-- host kernel
-  - `insmod mkring_container_bridge.ko role=host device_name=mkring_container_bridge`
-- sub-kernel
-  - `insmod mkring_container_bridge.ko role=guest device_name=mkring_container_bridge`
+Host kernel:
 
-然后按下面顺序工作：
+```bash
+insmod mkring_container_bridge.ko role=host device_name=mkring_container_bridge
+```
 
-1. sub-kernel 完成 `mkring_init`
-2. guest 用户态拉起 `containerd`
-3. guest 用户态对 `/dev/mkring_container_bridge` 发 `MKRING_CONTAINER_IOC_SET_READY`
-4. host 用户态对同名 device 发 `MKRING_CONTAINER_IOC_WAIT_READY`
-5. host 用户态发 `MKRING_CONTAINER_IOC_CALL`
-6. guest 用户态 `read()` 到 `REQUEST`，转发到 `containerd.sock`
-7. guest 用户态 `write()` 回 `RESPONSE`
+Sub-kernel:
 
-## 关键数据结构详解
+```bash
+insmod mkring_container_bridge.ko role=guest device_name=mkring_container_bridge
+```
 
-### 1) 启动参数：`struct mkring_boot_params`（`mkring.h`）
+Typical sequence:
 
-该结构由 `init_mk.c` 从 kernel cmdline 解析后传给 `mkring_init()`。
+1. the sub-kernel completes `mkring_init`
+2. guest userspace starts `containerd`
+3. guest userspace issues `MKRING_CONTAINER_IOC_SET_READY`
+4. host userspace waits with `MKRING_CONTAINER_IOC_WAIT_READY`
+5. host userspace sends `MKRING_CONTAINER_IOC_CALL`
+6. guest userspace receives the request, forwards it to `containerd.sock`, and returns the response through `write()`
 
-| 成员 | 作用 |
+## Stream Data-Plane Extension
+
+The TTY exec path uses a separate stream protocol:
+
+- [mkring_stream.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_stream.h)
+  - defines the stream message header and payloads
+  - `channel = MKRING_CHANNEL_STREAM`
+  - stream types: `STDIN`, `OUTPUT`, `CONTROL`
+  - control kinds include `EXIT`
+- [mkring_stream_bridge.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_stream_bridge.c)
+  - exposes `/dev/mkring_stream_bridge`
+  - forwards raw stream packets between userspace and the `mkring` transport
+
+This is the path used both by the raw TTY exec smoke test and by the current CRI/SPDY `crictl exec -it` front-end.
+
+## Key Data Structures
+
+### 1. Boot Parameters: `struct mkring_boot_params`
+
+`struct mkring_boot_params` is built by `init_mk.c` and passed into `mkring_init()`.
+
+| Field | Purpose |
 |---|---|
-| `shm_phys` | 共享内存物理基址。所有 kernel 必须看到同一物理区域。 |
-| `shm_size` | 共享内存总大小（字节）。用于边界校验和布局容量校验。 |
-| `kernel_id` | 本 kernel 的逻辑编号。用于定位本地收发方向队列。 |
-| `kernels` | 系统内 kernel 总数。决定队列规模 `kernels * kernels`。 |
-| `desc_num` | 每个方向队列的 descriptor 数量。影响并发与吞吐。 |
-| `msg_size` | 单条消息最大长度。也用于每个 desc 的 data slot 大小。 |
-| `force_init` | 强制重置共享区（通常仅 `kernel_id=0` 节点使用）。 |
-| `notify` | 可选 IPI 通知回调。非空时 `mkring_init()` 内部会自动注册。 |
-| `notify_priv` | `notify` 的私有上下文指针。 |
+| `shm_phys` | shared-memory physical base address visible to all kernels |
+| `shm_size` | total shared-memory size in bytes |
+| `kernel_id` | logical id of the local kernel |
+| `kernels` | total number of kernels in the system |
+| `desc_num` | descriptor count per directional queue |
+| `msg_size` | maximum size of a single message |
+| `force_init` | force reset of the shared area |
+| `notify` | optional IPI notify callback |
+| `notify_priv` | private context for the notify callback |
 
-### 2) 共享内存全局元数据
+### 2. Shared-Memory Global Metadata
 
-#### `struct mkring_shm_hdr`（`mkring.c`）
+#### `struct mkring_shm_hdr`
 
-共享区头，位于共享内存起始位置，负责“跨 kernel 一致配置”和初始化状态协同。
+The shared-memory header sits at the start of the shared region and carries the globally agreed transport configuration.
 
-| 成员 | 作用 |
+| Field | Purpose |
 |---|---|
-| `magic` | 魔数，识别共享区是否为 mkring 布局。 |
-| `version` | 布局版本号，防止不同实现混用。 |
-| `hdr_len` | 共享头长度（对齐后）。用于定位队列区起点。 |
-| `kernels` | 共享区采用的 kernel 数量配置。 |
-| `desc_num` | 共享区采用的每队列 descriptor 数。 |
-| `msg_size` | 共享区采用的单消息最大长度。 |
-| `queue_size` | 单个方向队列占用字节数（含 vring + data 区）。 |
-| `total_size` | mkring 实际需要的总字节数。用于容量检查。 |
-| `init_state` | 初始化状态机：`UNINIT/INITING/READY`。 |
-| `ready_bitmap` | 各 kernel 就绪位图，bit=`kernel_id`。 |
-| `reserved[6]` | 预留扩展字段。 |
+| `magic` | identifies the shared area as an `mkring` region |
+| `version` | layout version |
+| `hdr_len` | aligned header length |
+| `kernels` | number of kernels configured for the region |
+| `desc_num` | descriptors per directional queue |
+| `msg_size` | maximum single-message payload size |
+| `queue_size` | bytes occupied by one directional queue |
+| `total_size` | total bytes required by the full layout |
+| `init_state` | initialization state machine |
+| `ready_bitmap` | per-kernel readiness bitmap |
+| `reserved[6]` | reserved extension fields |
 
-#### `struct mkring_layout`（`mkring.c`）
+#### `struct mkring_layout`
 
-描述“单个方向队列”内部各子区域偏移，运行时通过它计算 ring/data 指针。
+`mkring_layout` caches the offsets of the vring subregions inside a single directional queue.
 
-| 成员 | 作用 |
+| Field | Purpose |
 |---|---|
-| `desc_off` | descriptor table 起始偏移。 |
-| `avail_off` | avail header 起始偏移。 |
-| `avail_ring_off` | avail ring 数组起始偏移。 |
-| `avail_event_off` | avail event 偏移（保留兼容位）。 |
-| `used_off` | used header 起始偏移。 |
-| `used_ring_off` | used ring 数组起始偏移。 |
-| `used_event_off` | used event 偏移（保留兼容位）。 |
-| `data_off` | payload data 区起始偏移。 |
-| `queue_size` | 单方向队列总字节数（页对齐）。 |
+| `desc_off` | descriptor table offset |
+| `avail_off` | avail header offset |
+| `avail_ring_off` | avail ring array offset |
+| `avail_event_off` | avail event offset |
+| `used_off` | used header offset |
+| `used_ring_off` | used ring array offset |
+| `used_event_off` | used event offset |
+| `data_off` | payload data area offset |
+| `queue_size` | total bytes of one directional queue |
 
-### 2.1) 共享内存区域布局与划分
+### 2.1 Shared-Memory Layout
 
-`mkring` 的共享内存按“两层布局”组织：
-
-1. 全局层：`共享头 + N x N 方向队列`
-2. 队列层：`desc + avail + used + data`
-
-#### 全局层布局
-
-共享物理区间（由 `mkring.shm_phys` / `mkring.shm_size` 指定）：
+The full shared-memory layout is:
 
 ```text
-[ shm_phys                                                        shm_phys + shm_size )
-  |<------------------------------- 可用共享内存 ------------------------------->|
-
-  +----------------------+----------------------+------------------ ... -----------+
-  | struct mkring_shm_hdr| queue(src=0,dst=0)  | queue(src=0,dst=1)               |
-  | (hdr_len, 对齐后)    | (queue_size bytes)  | (queue_size bytes)               |
-  +----------------------+----------------------+------------------ ... -----------+
-                                                                     ... queue(N-1,N-1)
+[ shared header ][ queue(0,0) ][ queue(0,1) ] ... [ queue(N-1,N-1) ]
 ```
 
-- `hdr_len = ALIGN(sizeof(struct mkring_shm_hdr), MKRING_ALIGN)`  
-- 方向队列总数：`queue_count = kernels * kernels`  
-- 每个方向队列大小：`queue_size = layout.queue_size`  
-- `queue(src,dst)` 的偏移：
-  - `qindex = src * kernels + dst`
-  - `qoff = hdr_len + qindex * queue_size`
+- `queue(src,dst)` is the one-way path from `src` to `dst`
+- total queue count is `kernels * kernels`
+- each queue has the same `queue_size`
+- `txq[peer]` maps to `queue(local_id, peer)`
+- `rxq[peer]` maps to `queue(peer, local_id)`
 
-共享区最小需求（`mkring_prepare_shared()` 校验）：
+This is why the design is `N x N`: both directions are independent, so `A -> B` and `B -> A` never contend for the same descriptors.
 
-```text
-required = hdr_len + kernels * kernels * queue_size
-```
-
-#### `struct mkring_shm_hdr` 的头部布局
-
-`mkring_shm_hdr` 位于共享区起始地址 `shm_phys + 0`，用于描述整片共享区的全局配置和状态机。
-
-典型布局（按当前字段定义顺序）：
-
-```text
-offset  size  field
-0x00    4     magic
-0x04    2     version
-0x06    2     hdr_len
-0x08    2     kernels
-0x0A    2     desc_num
-0x0C    4     msg_size
-0x10    4     queue_size
-0x14    4     total_size
-0x18    4     init_state
-0x1C    4     ready_bitmap
-0x20    24    reserved[6]
-```
-
-- `sizeof(struct mkring_shm_hdr)` 在当前实现下通常为 `56` 字节（`0x38`）。
-- `hdr_len` 不是直接等于 `sizeof(...)`，而是：
-  - `hdr_len = ALIGN(sizeof(struct mkring_shm_hdr), MKRING_ALIGN)`
-- 当前 `MKRING_ALIGN = 64`，所以常见情况下 `hdr_len = 64`，即 header 后会有对齐填充，再开始第一个 queue。
-
-#### 队列层布局（单个 queue 内部）
-
-单个方向队列内部偏移由 `mkring_calc_layout(desc_num, msg_size, &layout)` 计算：
-
-```text
-queue_base + 0
-  +-------------------------------+
-  | desc table                    | ndesc * sizeof(struct mkring_desc)
-  +-------------------------------+
-  | padding to 2-byte align       |
-  +-------------------------------+
-  | avail hdr                     | sizeof(struct mkring_avail_hdr)
-  +-------------------------------+
-  | avail ring[]                  | ndesc * sizeof(__le16)
-  +-------------------------------+
-  | avail_event                   | sizeof(__le16)
-  +-------------------------------+
-  | padding to 4-byte align       |
-  +-------------------------------+
-  | used hdr                      | sizeof(struct mkring_used_hdr)
-  +-------------------------------+
-  | used ring[]                   | ndesc * sizeof(struct mkring_used_elem)
-  +-------------------------------+
-  | used_event                    | sizeof(__le16)
-  +-------------------------------+
-  | padding to 64-byte align      |
-  +-------------------------------+
-  | data slots                    | ndesc * msg_size
-  +-------------------------------+
-  | padding to PAGE_SIZE align    |
-  +-------------------------------+
-```
-
-关键公式（对应 `mkring_calc_layout()`）：
-
-```text
-desc_bytes  = ndesc * sizeof(struct mkring_desc)
-avail_bytes = sizeof(struct mkring_avail_hdr) + ndesc * sizeof(__le16) + sizeof(__le16)
-used_bytes  = sizeof(struct mkring_used_hdr)  + ndesc * sizeof(struct mkring_used_elem) + sizeof(__le16)
-
-desc_off    = 0
-avail_off   = ALIGN(desc_off + desc_bytes, 2)
-used_off    = ALIGN(avail_off + avail_bytes, 4)
-data_off    = ALIGN(used_off + used_bytes, MKRING_ALIGN)
-queue_size  = ALIGN(data_off + ndesc * msg_size, PAGE_SIZE)
-```
-
-#### 为什么是 `N x N`
-
-- `queue(src,dst)` 表示“从 `src` 到 `dst`”的单向通道。
-- 因为方向独立，`A->B` 与 `B->A` 使用不同队列，互不抢占 descriptor。
-- 本地初始化时：
-  - `txq[peer]` 绑定 `queue(local_id, peer)`
-  - `rxq[peer]` 绑定 `queue(peer, local_id)`
-
-### 3) vring 基础元素（共享内存内）
+### 3. Vring Building Blocks
 
 #### `struct mkring_desc`
 
-| 成员 | 作用 |
+| Field | Purpose |
 |---|---|
-| `addr` | 该 desc 对应 data slot 的物理地址。 |
-| `len` | 当前消息长度（发送时写入，接收时读取）。 |
-| `flags` | 预留 flags（当前实现未使用链式特性）。 |
-| `next` | 预留 next desc（当前实现未使用）。 |
+| `addr` | physical address of the data slot for this descriptor |
+| `len` | current message length |
+| `flags` | reserved flags |
+| `next` | reserved next descriptor |
 
 #### `struct mkring_avail_hdr`
 
-| 成员 | 作用 |
+| Field | Purpose |
 |---|---|
-| `flags` | avail ring 标志位（当前实现未启用事件抑制）。 |
-| `idx` | 生产者索引；发送端每入队一条消息递增。 |
+| `flags` | avail ring flags |
+| `idx` | producer index |
 
 #### `struct mkring_used_elem`
 
-| 成员 | 作用 |
+| Field | Purpose |
 |---|---|
-| `id` | 已消费 descriptor 的 id。 |
-| `len` | 已消费消息长度。 |
+| `id` | consumed descriptor id |
+| `len` | consumed message length |
 
 #### `struct mkring_used_hdr`
 
-| 成员 | 作用 |
+| Field | Purpose |
 |---|---|
-| `flags` | used ring 标志位（当前实现未启用事件抑制）。 |
-| `idx` | 消费者索引；接收端每处理一条消息递增。 |
+| `flags` | used ring flags |
+| `idx` | consumer index |
 
-### 3.1) `avail ring` 与 `used ring` 的协同机制（详细）
+### 3.1 Avail/Used Cooperation
 
-可以把它理解为“一对提交/完成队列”：
+The two rings form a submit/complete pair:
 
-- `avail ring`：发送端提交“可读的 desc id”
-- `used ring`：接收端回执“已处理的 desc id”
+- `avail ring`: the sender publishes descriptor ids that now contain valid data
+- `used ring`: the receiver publishes descriptor ids that have been fully consumed
 
-#### 双方维护的进度指针
+A typical message flow is:
 
-- 发送端生产 `avail->idx`，接收端用本地 `last_avail_idx` 追赶它
-- 接收端生产 `used->idx`，发送端用本地 `last_used_idx` 追赶它
-- ring 槽位都通过 `slot = idx % desc_num` 回绕
+1. sender reclaims finished descriptors from `used`
+2. sender writes payload into the selected data slot
+3. sender publishes the descriptor id into `avail`
+4. receiver consumes the descriptor, copies the payload into a local receive queue, and publishes the id into `used`
+5. sender reclaims the descriptor on a later send
 
-#### 一条消息的完整流转
+Without the `used ring`, the sender would have no safe way to know when a descriptor could be reused.
 
-1. 发送端先回收  
-   调 `mkring_tx_reclaim_locked()` 读取 `used->idx/used->ring`，把已完成 id 从 `inflight bitmap` 清掉，恢复 `free_cnt`。
-2. 发送端发布  
-   分配一个空闲 `id`，写 `data[id]` 和 `desc[id].len`，然后按顺序写 `avail->ring[slot]=id`、`avail->idx++`。
-3. 接收端消费  
-   读取 `avail->idx`，循环处理 `last_avail_idx..avail_idx-1` 的每个 id，取 `desc/data` 并入本地接收队列。
-4. 接收端回执  
-   把同一个 `id` 写入 `used->ring`，再 `used->idx++`。
-5. 发送端下次回收  
-   下一次发送前再次扫 `used ring`，该 `id` 重新可分配。
+### 4. Local Queue View: `struct mkring_queue`
 
-#### 为什么必须有两个 ring
+`struct mkring_queue` is the local runtime view of one directional queue associated with a remote peer.
 
-- 只有 `avail ring`：接收端能读消息，但发送端不知道何时可复用 desc。
-- 加上 `used ring`：发送端获得“完成确认”，desc 才能安全循环复用。
-
-#### 常见状态判断
-
-- 接收侧“暂无新消息”：`last_avail_idx == avail->idx`
-- 发送侧“队列满”：无空闲 desc（`free_cnt == 0` 或位图找不到空位），发送返回 `-EAGAIN`
-
-### 4) 本地运行时队列视图：`struct mkring_queue`（`mkring.c`）
-
-这是“某个远端 peer 对应的单方向队列”在本地内核中的运行时封装。
-
-| 成员 | 作用 |
+| Field | Purpose |
 |---|---|
-| `ctx` | 回指全局 `mkring_ctx`。 |
-| `remote_id` | 对端 kernel id。 |
-| `qindex` | 全局方向索引（`src * kernels + dst`）。 |
-| `base` | 队列在共享内存中的虚拟地址基址。 |
-| `phys` | 队列在共享内存中的物理地址基址。 |
-| `inflight` | 发送中 desc 位图（仅 TX 队列使用）。 |
-| `free_cnt` | 当前可用 desc 计数（仅 TX）。 |
-| `last_used_idx` | 发送端已回收进度（对应 used.idx 游标）。 |
-| `last_avail_idx` | 接收端已消费进度（对应 avail.idx 游标）。 |
-| `tx_lock` | 保护发送入队和回收流程。 |
-| `rx_lock` | 保护本地 `rx_msgs` 链表与回调注册字段。 |
-| `proc_lock` | 保护 `mkring_process_rx_queue()`，避免并发重复消费。 |
-| `rx_msgs` | 本地接收消息链表。 |
-| `rx_wq` | 阻塞接收等待队列（`mkring_recv` 使用）。 |
-| `rx_pending` | 本地待取消息计数。 |
-| `cb` | 可选接收回调函数。 |
-| `cb_priv` | 回调私有上下文。 |
+| `ctx` | backpointer to the global `mkring_ctx` |
+| `remote_id` | peer kernel id |
+| `qindex` | global directional queue index |
+| `base` | virtual base address of the queue |
+| `phys` | physical base address of the queue |
+| `inflight` | bitmap of in-flight TX descriptors |
+| `free_cnt` | available TX descriptors |
+| `last_used_idx` | sender-side reclaim progress |
+| `last_avail_idx` | receiver-side consume progress |
+| `tx_lock` | protects TX enqueue and reclaim |
+| `rx_lock` | protects local RX structures |
+| `proc_lock` | protects `mkring_process_rx_queue()` |
+| `rx_msgs` | local receive-message list |
+| `rx_wq` | blocking receive wait queue |
+| `rx_pending` | count of local pending receive messages |
+| `cb` | optional receive callback |
+| `cb_priv` | receive callback private data |
 
-### 5) 本地接收消息节点：`struct mkring_rx_msg`（`mkring.c`）
+### 5. Local Receive Node: `struct mkring_rx_msg`
 
-该结构不在共享内存里，只存在于本 kernel 内部，用于把共享区数据转成稳定本地副本。
+This structure lives only in the local kernel and holds a stable copy of a received shared-memory message.
 
-| 成员 | 作用 |
+| Field | Purpose |
 |---|---|
-| `node` | 链表节点，挂入 `mkring_queue.rx_msgs`。 |
-| `len` | 消息长度。 |
-| `data[]` | 可变长 payload 缓冲。 |
+| `node` | linked-list node for `rx_msgs` |
+| `len` | payload length |
+| `data[]` | variable-length payload buffer |
 
-### 6) 全局上下文：`struct mkring_ctx`（`mkring.c`）
+### 6. Global Context: `struct mkring_ctx`
 
-每个 kernel 进程空间只维护一个 `mkring_ctx` 实例，代表本地 mkring 实例状态。
+Each kernel instance keeps exactly one `mkring_ctx` as the local transport state.
 
-| 成员 | 作用 |
+| Field | Purpose |
 |---|---|
-| `shm_phys` / `shm_size` | 共享区物理地址与大小。 |
-| `shm_base` | `memremap()` 后的虚拟地址。 |
-| `hdr` / `hdr_len` | 共享区头指针与长度。 |
-| `local_id` | 本地 kernel id。 |
-| `kernels` / `desc_num` / `msg_size` | 关键运行参数。 |
-| `layout` | 单方向队列布局缓存。 |
-| `txq` | 发送队列数组，索引为目标 kernel id。 |
-| `rxq` | 接收队列数组，索引为源 kernel id。 |
-| `ipc_lock` | 保护通知回调注册/注销。 |
-| `notify` / `notify_priv` | 发送完成后触发的 IPI 通知函数及私参。 |
-| `force_init` | 是否启用强制初始化共享区。 |
-| `ready` | 当前实例是否已完成初始化并可收发。 |
+| `shm_phys` / `shm_size` | shared-memory physical address and size |
+| `shm_base` | remapped virtual address |
+| `hdr` / `hdr_len` | shared header pointer and aligned length |
+| `local_id` | local kernel id |
+| `kernels` / `desc_num` / `msg_size` | key runtime parameters |
+| `layout` | cached single-queue layout |
+| `txq` | TX queue array indexed by destination kernel id |
+| `rxq` | RX queue array indexed by source kernel id |
+| `ipc_lock` | protects notify callback registration |
+| `notify` / `notify_priv` | IPI notify callback and context |
+| `force_init` | whether forced shared-area initialization is enabled |
+| `ready` | whether the local instance is ready for communication |
 
-## 数据通信函数调用路径
+## Data Flow Through the Core APIs
 
-下面给出从系统启动到一次完整收发的函数调用链路。
+### 1. Built-in Initialization
 
-### 1) 启动初始化路径（built-in）
+1. kernel command line is parsed in `init_mk.c`
+2. `subsys_initcall(init_mk)` runs `init_mk()`
+3. `init_mk()` calls `mkring_init(&params)`
+4. `mkring_init()`:
+   - computes queue layout with `mkring_calc_layout()`
+   - registers the shared-memory resource with `request_mem_region()`
+   - maps shared memory with `memremap()`
+   - initializes or validates the shared-memory layout
+   - builds local `txq[peer]` and `rxq[peer]` views
 
-1. kernel 启动解析 cmdline：`__setup("mkring.xxx=", ...)`（`init_mk.c`）
-2. `subsys_initcall(init_mk)` 触发 `init_mk()`
-3. `init_mk()` 组装 `struct mkring_boot_params`，调用 `mkring_init(&params)`
-4. `mkring_init()` 主要内部流程：
-   - `mkring_calc_layout()`：计算每个方向队列的 vring 布局
-   - `request_mem_region()`：注册共享内存资源到 `/proc/iomem`（名称 `mkring-shm`）
-   - `memremap()`：映射共享内存
-   - `mkring_prepare_shared()`：初始化/检查共享区头与所有方向队列
-   - `mkring_queue_setup()`：建立本地 `txq[peer]` / `rxq[peer]` 视图
+### 2. Send Path (Kernel A -> Kernel B)
 
-### 2) 发送路径（Kernel A -> Kernel B）
+1. upper layer calls `mkring_send(dst_kid, data, len)`
+2. `mkring_send()` checks parameters and `ready_bitmap`
+3. `mkring_tx_enqueue()` reclaims finished descriptors
+4. the sender copies the payload into the shared-memory data slot
+5. the sender updates the descriptor and publishes into `avail`
+6. the registered notify callback sends an IPI to the destination kernel
 
-1. 上层调用：`mkring_send(dst_kid, data, len)`
-2. `mkring_send()` 参数检查后先读取共享头 `ready_bitmap`，若目标 `dst_kid` 未就绪直接返回 `-ENOLINK`
-3. 目标就绪时进入 `mkring_tx_enqueue(txq[dst], ...)`
-4. `mkring_tx_enqueue()` 内部步骤：
-   - `mkring_tx_reclaim_locked()` 回收已被远端写回 `used` 的 desc
-   - 分配一个空闲 desc id（`inflight bitmap`）
-   - `memcpy()` 把 payload 写入该 desc 对应共享 buffer
-   - 更新 desc `len`
-   - 写 `avail->ring[slot] = desc_id`
-   - 写 `avail->idx++`（消息正式可见）
-5. `mkring_send()` 调用已注册 IPI notify 回调：
-   - `notify(src_kid, dst_kid, priv)`
-   - 默认后端通过 APIC 向目标 kernel 发送 IPI
+### 3. Arrival and RX Enqueue (Kernel B)
 
-### 3) 到达通知与接收入队路径（Kernel B）
+1. the target kernel receives an IPI and calls `mkring_ipi_interrupt()` or `mkring_handle_ipi_all()`
+2. `mkring_process_rx_queue()` consumes new avail entries
+3. payload is copied into a local receive queue through `mkring_rx_enqueue_local()`
+4. the receiver writes the descriptor id into `used` so the sender can reclaim it later
 
-1. 目标 kernel 收到 IPI 后，在 IPI vector handler 中调用：
-   - `mkring_ipi_interrupt()`（内部调用 `mkring_handle_ipi_all()`）
-   - 或直接调用 `mkring_handle_ipi_all()`
-2. 上述入口进入 `mkring_process_rx_queue(rxq[src])`
-3. `mkring_process_rx_queue()` 内部步骤：
-   - 读取 `avail->idx`，循环消费新 desc id
-   - 从共享 buffer 取数据，调用 `mkring_rx_enqueue_local()` 放入本地 `rx_msgs` 链表
-   - 同时写回 `used->ring` 和 `used->idx++`（告诉发送端该 desc 可回收）
-4. `mkring_rx_enqueue_local()`：
-   - 消息入本地队列
-   - `wake_up_interruptible(&rx_wq)`
-   - 若注册了回调，直接执行 `rx_cb(src, data, len, priv)`
+### 4. Upper-Layer Receive
 
-### 4) 上层取数路径（两种模式）
+Two modes are supported:
 
-模式 A：阻塞/超时接收  
-1. 上层调用 `mkring_recv(src_kid, buf, buf_len, &out_len, timeout)`  
-2. `wait_event_interruptible_timeout()` 等待 `rx_pending > 0`  
-3. 从 `rx_msgs` 取首包，拷贝到用户提供缓冲区并返回
+- blocking receive with `mkring_recv()`
+- callback-driven receive via `mkring_register_rx_cb()`
 
-模式 B：回调接收  
-1. 上层先调用 `mkring_register_rx_cb(src_kid, cb, priv)`  
-2. 每次 `mkring_process_rx_queue()` 收到新包时，`mkring_rx_enqueue_local()` 触发 `cb()`  
-3. 回调上下文通常是中断上下文，必须原子上下文安全
+### 5. TX Descriptor Reclaim
 
-### 5) 发送端 desc 回收路径
+When the receiver updates `used->idx`, the sender reclaims those descriptors during a later send through `mkring_tx_reclaim_locked()`.
 
-1. 接收端每消费一条消息都会更新发送方向队列的 `used->idx`
-2. 发送端下一次进入 `mkring_tx_enqueue()` 时先调用 `mkring_tx_reclaim_locked()`
-3. `mkring_tx_reclaim_locked()` 扫描新 `used` 元素，清理 `inflight bitmap`，归还 desc
+## IPI Notification Model
 
-## IPI 通知模型
+The default notify backend uses IPI:
 
-`mkring` 的默认通知后端是 IPI：
+- sender: `mkring_send()` enqueues data and calls `notify(src, dst, priv)`
+- default backend in `init_mk.c`: sends an APIC IPI to the destination kernel
+- receiver: the IPI handler calls `mkring_ipi_interrupt()` or `mkring_handle_ipi_all()` to drain RX queues
 
-- 发送侧：`mkring_send()` 完成共享内存入队后，调用已注册的 `notify(src, dst, priv)`。
-- 默认 notify（`init_mk.c`）通过 APIC 向目标 kernel 发送 IPI。
-- 接收侧：IPI vector handler 调用 `mkring_ipi_interrupt()`（或 `mkring_handle_ipi_all()`）消费远端 avail ring。
+`mkring_send()` checks two things before transmission:
 
-### notify 注册逻辑说明
+- target readiness in `ready_bitmap`
+- presence of a registered notify callback
 
-`mkring` 的 notify 注册支持两种方式：
+If the destination is not ready, `mkring_send()` returns `-ENOLINK`. If no notify backend is registered, it returns `-ENOTCONN`.
 
-1. 自动注册（推荐）
-   - 在 `mkring_boot_params.notify` 传入回调
-   - `mkring_init()` 内部调用 `mkring_register_ipi_notify()`
-2. 手动注册
-   - `mkring_init()` 后由平台侧显式调用 `mkring_register_ipi_notify(platform_notify, priv)`
+## Quick Self-Test (Two Kernels)
 
-`mkring_send()` 每次发送前会执行两类关键检查：
+### Test Idea
 
-- 目标就绪检查：若 `ready_bitmap` 中目标 `dst_kid` 位未置位，返回 `-ENOLINK`
-- notify 检查：`ctx->notify` 为空时返回 `-ENOTCONN`
+The tree includes [mkring_test.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_test.c), which repeatedly sends test traffic to a peer and prints `tx_ok/tx_fail/rx_ok/rx_bad` counters.
 
-检查通过后，才会入队并调用 `notify(src, dst, priv)`。
+### Module Parameters
 
-如需解绑，调用 `mkring_unregister_ipi_notify()`。
+See the file for the test-specific `insmod` parameters.
 
-当前代码中对应位置：
+### Typical Validation
 
-- 注册实现：`mkring_register_ipi_notify()`（`mkring.c`）
-- 自动注册调用点：`mkring_init()`（`mkring.c`，`params->notify` 非空时）
-- 发送时检查与调用：`mkring_send()`（含 `ready_bitmap` 检查与 `notify` 检查）
-- 注销实现：`mkring_unregister_ipi_notify()`（`mkring.c`）
+1. boot two kernels with aligned `mkring.*` command-line parameters
+2. ensure the notify backend is active
+3. load the test module in both kernels
+4. watch the counters grow
 
-建议时序：
+### Pass Criteria
 
-1. `mkring_init()` 成功
-2. 自动注册成功（或手动 `mkring_register_ipi_notify()` 成功）
-3. 业务层开始调用 `mkring_send()`
+- `tx_ok` continues to increase
+- `rx_ok` continues to increase
+- `tx_fail` stays at zero or only shows early startup noise
+- `rx_bad` stays at zero
 
-### `init_mk.c` 中的 notify 来源（默认 IPI 后端）
+### If It Fails
 
-`init_mk.c` 提供了 weak hook：
+Look first at:
 
-- `init_mk_get_notify(void **priv)`
+- `ready_bitmap` and peer readiness
+- notify backend wiring
+- shared-memory layout mismatches
+- IPI delivery
+- queue-size and message-size mismatches
+- demux/channel validation for higher-level bridge modules
 
-默认实现逻辑如下：
+## Notes
 
-1. 若未配置 `mkring.ipi_dests`，返回 `NULL`（即无默认 notify 后端）
-2. 若配置了 `mkring.ipi_dests`，返回默认 IPI notify 回调
-3. 默认 IPI notify 回调发送行为（x86）：
-   - 取 `dst_kid` 对应 APIC 物理 ID（来自 `mkring.ipi_dests`）
-   - 调用 `apic_icr_write(APIC_DM_FIXED | APIC_DEST_PHYSICAL | vector, apic_id)`
-   - `vector` 来自 `mkring.ipi_vector`（默认 `0xF2`）
-4. 目标 kernel 的 IPI vector handler 需要直接调用 `mkring_ipi_interrupt()`
+This directory now supports both:
 
-你也可以在内核源码其他文件中提供同名强符号实现覆盖 `init_mk_get_notify()`，替换成平台专用 IPI 逻辑。
+- the container control plane over channel 1, and
+- the TTY exec stream data plane over channel 3.
 
-## 快速自测方案（双 kernel）
+That split matters operationally:
 
-项目已提供可加载测试模块 `mkring_test.c`（`obj-m += mkring_test.o`）。
-
-### 自测原理
-
-- `insmod mkring_test.ko` 后，每个 kernel 启动一个发送线程，周期调用 `mkring_send(peer, ...)`。
-- 同时在 `peer` 对应 `src_kid` 上注册 `mkring_register_rx_cb()` 回调。
-- 回调收到合法测试包后累加 `rx_ok`，异常包累加 `rx_bad`。
-- 周期性打印统计：`tx_ok/tx_fail/rx_ok/rx_bad`。
-
-### 模块参数（insmod 传入）
-
-- `peer=<id>`：对端 kernel_id（必填）
-- `period_ms=<ms>`：发送周期，默认 `1000`
-- `report_sec=<sec>`：统计打印周期，默认 `5`
-
-### 启动参数示例（kernels=2）
-
-kernel0：
-
-```text
-mkring.shm_phys=0x400000000 mkring.shm_size=0x1000000 mkring.kernels=2 mkring.desc_num=256 mkring.msg_size=1024 mkring.ipi_vector=0xF5 mkring.ipi_dests=0,1 mkring.force_init=1 mkring.kernel_id=0
-```
-
-kernel1：
-
-```text
-mkring.shm_phys=0x400000000 mkring.shm_size=0x1000000 mkring.kernels=2 mkring.desc_num=256 mkring.msg_size=1024 mkring.ipi_vector=0xF5 mkring.ipi_dests=0,1 mkring.force_init=0 mkring.kernel_id=1
-```
-
-### 加载测试模块
-
-在 kernel0：
-
-```bash
-insmod mkring_test.ko peer=1 period_ms=200 report_sec=3
-```
-
-在 kernel1：
-
-```bash
-insmod mkring_test.ko peer=0 period_ms=200 report_sec=3
-```
-
-停止测试：
-
-```bash
-rmmod mkring_test
-```
-
-### 观测方法
-
-在两个 kernel 分别观察 dmesg：
-
-```bash
-dmesg -w | grep -E "mkring|mkring-test"
-```
-
-### 通过判据
-
-- 两侧都出现 `mkring-test: started ...`
-- 周期日志里：
-  - `tx_ok` 持续增长
-  - `rx_ok` 持续增长
-  - `tx_fail` 基本为 0（启动早期短暂 `ENOLINK` 可接受）
-  - `rx_bad` 始终为 0
-
-### 失败定位建议
-
-- `tx_fail` 持续增长且 `rx_ok` 不增长：
-  - 先确认 IPI vector 入口是否调用 `mkring_ipi_interrupt()`
-  - 再确认 `mkring.ipi_vector` 与平台实际 vector 一致
-  - 再确认 `mkring.ipi_dests` 是否为 `kernel_id -> APIC ID` 正确映射
-  - 再确认 `insmod mkring_test.ko peer=<peer>` 的 `peer` 是否正确
-- 出现 `-ENOTCONN`：
-  - 说明 notify 未注册，检查 `init_mk_get_notify()` 与 `mkring.ipi_dests`
-- 出现 `-ENOLINK`：
-  - 说明目标 kernel 还没 ready，检查对端启动状态与参数一致性
-
-## 注意
-
-- 需要平台保证共享内存跨 kernel 可见性（cache coherence/映射属性一致）。
-- 若 `request_mem_region("mkring-shm")` 失败（地址范围与现有资源冲突），`mkring_init()` 会返回 `-EBUSY`。
-- `mkring_register_rx_cb()` 回调通常运行在中断上下文，回调代码必须原子上下文安全。
-- 推荐冷启动全体 kernel；若需重置共享区，可由 `kernel_id=0` 且 `force_init=1` 的节点执行。
+- control-plane traffic must continue using the `mkring_proto`-style container message wrapper,
+- stream traffic uses its own stream header format and must be validated by the channel-specific stream code, not by control-plane header rules.

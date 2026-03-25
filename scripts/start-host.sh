@@ -11,9 +11,11 @@ MKCRI_BIN="${MKCRI_BIN:-$ROOT_DIR/mk-container/mkcri}"
 
 MKRING_BRIDGE_TRANSPORT="${MKRING_BRIDGE_TRANSPORT:-device}"
 MKRING_BRIDGE_DEVICE_PATH="${MKRING_BRIDGE_DEVICE_PATH:-/dev/mkring_container_bridge}"
+MKRING_STREAM_DEVICE_PATH="${MKRING_STREAM_DEVICE_PATH:-/dev/mkring_stream_bridge}"
 MKRING_BRIDGE_LISTEN_SOCKET="${MKRING_BRIDGE_LISTEN_SOCKET:-/run/mk-container/mkring-bridge.sock}"
 
 MKCRI_LISTEN_SOCKET="${MKCRI_LISTEN_SOCKET:-/tmp/mkcri.sock}"
+MKCRI_STREAM_DEVICE_PATH="${MKCRI_STREAM_DEVICE_PATH:-$MKRING_STREAM_DEVICE_PATH}"
 MK_CONTROL_TRANSPORT="${MK_CONTROL_TRANSPORT:-mkring}"
 MK_MKRING_BRIDGE_SOCKET="${MK_MKRING_BRIDGE_SOCKET:-$MKRING_BRIDGE_LISTEN_SOCKET}"
 MK_KERNEL_START_COMMAND="${MK_KERNEL_START_COMMAND:-/usr/local/bin/start-subkernel}"
@@ -124,17 +126,28 @@ ensure_kernel_commands() {
 
 ensure_module_device() {
 	local dev_name
+	local stream_dev_name
 
 	[[ "$MKRING_BRIDGE_TRANSPORT" == "device" ]] || return 0
 	if [[ -e "$MKRING_BRIDGE_DEVICE_PATH" ]]; then
+		:
+	else
+		dev_name="$(basename "$MKRING_BRIDGE_DEVICE_PATH")"
+		modprobe mkring_container_bridge role=host "device_name=$dev_name"
+
+		wait_for_path "$MKRING_BRIDGE_DEVICE_PATH" 5 || \
+			die "device not ready after modprobe: $MKRING_BRIDGE_DEVICE_PATH"
+	fi
+
+	if [[ -e "$MKRING_STREAM_DEVICE_PATH" ]]; then
 		return 0
 	fi
 
-	dev_name="$(basename "$MKRING_BRIDGE_DEVICE_PATH")"
-	modprobe mkring_container_bridge role=host "device_name=$dev_name"
+	stream_dev_name="$(basename "$MKRING_STREAM_DEVICE_PATH")"
+	modprobe mkring_stream_bridge "device_name=$stream_dev_name"
 
-	wait_for_path "$MKRING_BRIDGE_DEVICE_PATH" 5 || \
-		die "device not ready after modprobe: $MKRING_BRIDGE_DEVICE_PATH"
+	wait_for_path "$MKRING_STREAM_DEVICE_PATH" 5 || \
+		die "device not ready after modprobe: $MKRING_STREAM_DEVICE_PATH"
 }
 
 start_bridge() {
@@ -163,6 +176,7 @@ start_mkcri() {
 		MK_CONTROL_TRANSPORT="$MK_CONTROL_TRANSPORT" \
 		MK_MKRING_BRIDGE_SOCKET="$MK_MKRING_BRIDGE_SOCKET" \
 		MKCRI_LISTEN_SOCKET="$MKCRI_LISTEN_SOCKET" \
+		MKCRI_STREAM_DEVICE_PATH="$MKCRI_STREAM_DEVICE_PATH" \
 		MK_KERNEL_START_COMMAND="$MK_KERNEL_START_COMMAND" \
 		MK_KERNEL_STOP_COMMAND="$MK_KERNEL_STOP_COMMAND" \
 		"$MKCRI_BIN" \
@@ -196,8 +210,10 @@ mkcri:
 effective config:
   MKRING_BRIDGE_TRANSPORT=$MKRING_BRIDGE_TRANSPORT
   MKRING_BRIDGE_DEVICE_PATH=$MKRING_BRIDGE_DEVICE_PATH
+  MKRING_STREAM_DEVICE_PATH=$MKRING_STREAM_DEVICE_PATH
   MK_CONTROL_TRANSPORT=$MK_CONTROL_TRANSPORT
   MK_MKRING_BRIDGE_SOCKET=$MK_MKRING_BRIDGE_SOCKET
+  MKCRI_STREAM_DEVICE_PATH=$MKCRI_STREAM_DEVICE_PATH
   MK_KERNEL_START_COMMAND=$MK_KERNEL_START_COMMAND
   MK_KERNEL_STOP_COMMAND=$MK_KERNEL_STOP_COMMAND
 EOF

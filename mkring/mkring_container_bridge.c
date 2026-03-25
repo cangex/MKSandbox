@@ -117,6 +117,10 @@ static bool mkrc_valid_operation(u8 operation)
 	case MKRING_CONTAINER_OP_REMOVE:
 	case MKRING_CONTAINER_OP_STATUS:
 	case MKRING_CONTAINER_OP_READ_LOG:
+	case MKRING_CONTAINER_OP_EXEC_TTY_PREPARE:
+	case MKRING_CONTAINER_OP_EXEC_TTY_START:
+	case MKRING_CONTAINER_OP_EXEC_TTY_RESIZE:
+	case MKRING_CONTAINER_OP_EXEC_TTY_CLOSE:
 		return true;
 	default:
 		return false;
@@ -139,6 +143,14 @@ static u32 mkrc_payload_len_for_message(const struct mkring_container_message *m
 			return sizeof(msg->payload.control_req);
 		case MKRING_CONTAINER_OP_READ_LOG:
 			return sizeof(msg->payload.read_log_req);
+		case MKRING_CONTAINER_OP_EXEC_TTY_PREPARE:
+			return sizeof(msg->payload.exec_tty_prepare_req);
+		case MKRING_CONTAINER_OP_EXEC_TTY_START:
+			return sizeof(msg->payload.exec_tty_start_req);
+		case MKRING_CONTAINER_OP_EXEC_TTY_RESIZE:
+			return sizeof(msg->payload.exec_tty_resize_req);
+		case MKRING_CONTAINER_OP_EXEC_TTY_CLOSE:
+			return sizeof(msg->payload.exec_tty_close_req);
 		default:
 			return 0;
 		}
@@ -154,6 +166,12 @@ static u32 mkrc_payload_len_for_message(const struct mkring_container_message *m
 			return sizeof(msg->payload.status_resp);
 		case MKRING_CONTAINER_OP_READ_LOG:
 			return sizeof(msg->payload.read_log_resp);
+		case MKRING_CONTAINER_OP_EXEC_TTY_PREPARE:
+			return sizeof(msg->payload.exec_tty_prepare_resp);
+		case MKRING_CONTAINER_OP_EXEC_TTY_START:
+		case MKRING_CONTAINER_OP_EXEC_TTY_RESIZE:
+		case MKRING_CONTAINER_OP_EXEC_TTY_CLOSE:
+			return 0;
 		case MKRING_CONTAINER_OP_START:
 		case MKRING_CONTAINER_OP_REMOVE:
 			return 0;

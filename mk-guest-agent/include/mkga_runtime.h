@@ -22,6 +22,15 @@ struct mkga_runtime_ops {
 	int (*read_log)(struct mkga_runtime *runtime,
 			const struct mkga_read_log_req *req,
 			struct mkga_read_log_resp *resp);
+	int (*exec_tty_prepare)(struct mkga_runtime *runtime,
+				const struct mkga_exec_tty_prepare_req *req,
+				struct mkga_exec_tty_prepare_resp *resp);
+	int (*exec_tty_start)(struct mkga_runtime *runtime,
+			      const struct mkga_exec_session_control_req *req);
+	int (*exec_tty_resize)(struct mkga_runtime *runtime,
+			       const struct mkga_exec_tty_resize_req *req);
+	int (*exec_tty_close)(struct mkga_runtime *runtime,
+			      const struct mkga_exec_session_control_req *req);
 	void (*destroy)(struct mkga_runtime *runtime);
 };
 
@@ -46,6 +55,15 @@ int mkga_runtime_status_container(struct mkga_runtime *runtime,
 int mkga_runtime_read_log(struct mkga_runtime *runtime,
 			  const struct mkga_read_log_req *req,
 			  struct mkga_read_log_resp *resp);
+int mkga_runtime_exec_tty_prepare(struct mkga_runtime *runtime,
+				  const struct mkga_exec_tty_prepare_req *req,
+				  struct mkga_exec_tty_prepare_resp *resp);
+int mkga_runtime_exec_tty_start(struct mkga_runtime *runtime,
+				const struct mkga_exec_session_control_req *req);
+int mkga_runtime_exec_tty_resize(struct mkga_runtime *runtime,
+				 const struct mkga_exec_tty_resize_req *req);
+int mkga_runtime_exec_tty_close(struct mkga_runtime *runtime,
+				const struct mkga_exec_session_control_req *req);
 void mkga_runtime_destroy(struct mkga_runtime *runtime);
 
 struct mkga_runtime *mkga_memory_runtime_create(void);

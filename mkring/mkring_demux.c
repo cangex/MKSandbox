@@ -11,6 +11,12 @@
 
 #define MKRING_DEMUX_NAME "mkring-demux"
 
+struct mkring_demux_header_prefix {
+	__u32 magic;
+	__u8 version;
+	__u8 channel;
+} __attribute__((packed));
+
 struct mkring_demux_handler {
 	bool registered;
 	struct mkring_demux_ops ops;
@@ -35,11 +41,17 @@ static bool mkring_demux_valid_peer(const struct mkring_demux_ctx *ctx, u16 peer
 
 static void mkring_demux_rx_cb(u16 src_kid, const void *data, u32 len, void *priv)
 {
-	const struct mkring_proto_header *hdr = data;
+	const struct mkring_demux_header_prefix *hdr = data;
 	struct mkring_demux_handler handler;
 	unsigned long flags;
 
-	if (!mkring_proto_header_valid(data, len))
+	if (!hdr || len < sizeof(*hdr))
+		return;
+	if (hdr->magic != MKRING_PROTO_MAGIC)
+		return;
+	if (hdr->version != MKRING_PROTO_VERSION)
+		return;
+	if (hdr->channel == 0)
 		return;
 	if (!mkring_demux_valid_peer(&mkring_demux, src_kid))
 		return;

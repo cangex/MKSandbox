@@ -82,6 +82,11 @@ mount_core_fs() {
 	bb mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 	bb mount -t proc proc /proc || fatal "mount /proc failed"
 	bb mount -t sysfs sysfs /sys || fatal "mount /sys failed"
+	bb mkdir -p /dev/pts
+	bb mount -t devpts devpts /dev/pts -o newinstance,ptmxmode=0666,mode=0620 \
+		2>/tmp/devpts.mount.log || \
+		bb mount -t devpts devpts /dev/pts 2>>/tmp/devpts.mount.log || \
+		fatal "mount /dev/pts failed"
 	bb mount -t tmpfs tmpfs /run 2>/dev/null || true
 	bb mount -t tmpfs tmpfs /tmp 2>/dev/null || true
 	bb mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || true
@@ -94,6 +99,10 @@ ensure_basic_dev_nodes() {
 	[ -e /dev/null ] || bb mknod /dev/null c 1 3
 	[ -e /dev/tty ] || bb mknod /dev/tty c 4 1
 	[ -e /dev/console ] || bb mknod /dev/console c 5 1
+	if [ -e /dev/pts/ptmx ]; then
+		bb rm -f /dev/ptmx
+		bb ln -sf /dev/pts/ptmx /dev/ptmx
+	fi
 }
 
 prepare_runtime_links() {
@@ -131,6 +140,24 @@ ensure_guest_bridge_device() {
 	fi
 
 	wait_for_path "$BRIDGE_DEVICE" 10 || fatal "guest bridge device not ready: $BRIDGE_DEVICE"
+}
+
+ensure_guest_stream_device() {
+	if [ -e "$STREAM_DEVICE" ]; then
+		return 0
+	fi
+
+	if command -v modprobe >/dev/null 2>&1; then
+		modprobe mkring_stream_bridge "device_name=$STREAM_DEVICE_NAME" \
+			2>/tmp/mkring-stream.modprobe.log || true
+	fi
+
+	if [ ! -e "$STREAM_DEVICE" ] && [ -f "$STREAM_MODULE" ]; then
+		bb insmod "$STREAM_MODULE" "device_name=$STREAM_DEVICE_NAME" \
+			2>/tmp/mkring-stream.insmod.log || true
+	fi
+
+	wait_for_path "$STREAM_DEVICE" 10 || fatal "guest stream device not ready: $STREAM_DEVICE"
 }
 
 start_containerd() {
@@ -181,6 +208,7 @@ start_guest_agent() {
 	MK_GUEST_AGENT_TRANSPORT=mkring-device \
 	MK_GUEST_AGENT_RUNTIME=containerd \
 	MK_GUEST_AGENT_BRIDGE_DEVICE="$BRIDGE_DEVICE" \
+	MK_GUEST_AGENT_STREAM_DEVICE="$STREAM_DEVICE" \
 	MK_GUEST_AGENT_PEER_KERNEL_ID="$PEER_KERNEL_ID" \
 	MK_GUEST_AGENT_CONTAINERD_SOCKET="$CONTAINERD_SOCKET" \
 	MK_GUEST_AGENT_CTR_PATH="$CTR_BIN" \
@@ -202,6 +230,7 @@ print_summary() {
 guest init complete
 
 bridge device: $BRIDGE_DEVICE
+stream device: $STREAM_DEVICE
 containerd socket: $CONTAINERD_SOCKET
 containerd log: $CONTAINERD_LOG
 mk-guest-agent log: $AGENT_LOG
@@ -215,6 +244,9 @@ EOF
 BRIDGE_DEVICE="$(cmdline_get mkga.bridge_device || echo /dev/mkring_container_bridge)"
 BRIDGE_DEVICE_NAME="${BRIDGE_DEVICE##*/}"
 BRIDGE_MODULE="$(cmdline_get mkga.bridge_module || true)"
+STREAM_DEVICE="$(cmdline_get mkga.stream_device || echo /dev/mkring_stream_bridge)"
+STREAM_DEVICE_NAME="${STREAM_DEVICE##*/}"
+STREAM_MODULE="$(cmdline_get mkga.stream_module || true)"
 PEER_KERNEL_ID="$(cmdline_get mkga.peer_kernel_id || echo 0)"
 CONTAINERD_BIN="$(cmdline_get mkga.containerd_bin || true)"
 CTR_BIN="$(cmdline_get mkga.ctr_bin || true)"
@@ -232,6 +264,11 @@ BRIDGE_MODULE="$(find_existing_path \
 	"/mkring_container_bridge.ko" \
 	"/lib/modules/mkring_container_bridge.ko" \
 	"/modules/mkring_container_bridge.ko" || true)"
+STREAM_MODULE="$(find_existing_path \
+	"$STREAM_MODULE" \
+	"/mkring_stream_bridge.ko" \
+	"/lib/modules/mkring_stream_bridge.ko" \
+	"/modules/mkring_stream_bridge.ko" || true)"
 CONTAINERD_BIN="$(find_existing_path \
 	"$CONTAINERD_BIN" \
 	"/bin/containerd" \
@@ -263,6 +300,7 @@ ensure_basic_dev_nodes
 prepare_runtime_links
 ensure_overlay_ready
 ensure_guest_bridge_device
+ensure_guest_stream_device
 start_containerd
 import_images_if_present
 start_guest_agent

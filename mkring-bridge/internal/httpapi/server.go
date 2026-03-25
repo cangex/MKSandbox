@@ -141,6 +141,14 @@ func (s *Server) handleKernels(w http.ResponseWriter, r *http.Request) {
 		s.handleContainerStatus(w, r, peerKernelID, parts[2])
 	case len(parts) == 4 && parts[1] == "containers" && parts[3] == "read-log" && r.Method == http.MethodPost:
 		s.handleReadLog(w, r, peerKernelID, parts[2])
+	case len(parts) == 4 && parts[1] == "containers" && parts[3] == "exec-tty" && r.Method == http.MethodPost:
+		s.handleExecTTYPrepare(w, r, peerKernelID, parts[2])
+	case len(parts) == 4 && parts[1] == "sessions" && parts[3] == "start" && r.Method == http.MethodPost:
+		s.handleExecTTYStart(w, r, peerKernelID, parts[2])
+	case len(parts) == 4 && parts[1] == "sessions" && parts[3] == "resize" && r.Method == http.MethodPost:
+		s.handleExecTTYResize(w, r, peerKernelID, parts[2])
+	case len(parts) == 4 && parts[1] == "sessions" && parts[3] == "close" && r.Method == http.MethodPost:
+		s.handleExecTTYClose(w, r, peerKernelID, parts[2])
 	default:
 		writeError(w, http.StatusNotFound, fmt.Errorf("unknown path: %s", r.URL.Path))
 	}
@@ -256,4 +264,57 @@ func (s *Server) handleReadLog(w http.ResponseWriter, r *http.Request, peerKerne
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleExecTTYPrepare(w http.ResponseWriter, r *http.Request, peerKernelID uint16, containerID string) {
+	var req protocol.ExecTTYPreparePayload
+	if !decodeJSON(w, r, s.cfg.MessageMaxBytes, &req) {
+		return
+	}
+	req.ContainerID, _ = url.PathUnescape(containerID)
+	resp, err := s.service.ExecTTYPrepare(r.Context(), peerKernelID, req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleExecTTYStart(w http.ResponseWriter, r *http.Request, peerKernelID uint16, sessionID string) {
+	var req protocol.ExecTTYStartPayload
+	if !decodeJSON(w, r, s.cfg.MessageMaxBytes, &req) {
+		return
+	}
+	req.SessionID, _ = url.PathUnescape(sessionID)
+	if err := s.service.ExecTTYStart(r.Context(), peerKernelID, req); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleExecTTYResize(w http.ResponseWriter, r *http.Request, peerKernelID uint16, sessionID string) {
+	var req protocol.ExecTTYResizePayload
+	if !decodeJSON(w, r, s.cfg.MessageMaxBytes, &req) {
+		return
+	}
+	req.SessionID, _ = url.PathUnescape(sessionID)
+	if err := s.service.ExecTTYResize(r.Context(), peerKernelID, req); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleExecTTYClose(w http.ResponseWriter, r *http.Request, peerKernelID uint16, sessionID string) {
+	var req protocol.ExecTTYClosePayload
+	if !decodeJSON(w, r, s.cfg.MessageMaxBytes, &req) {
+		return
+	}
+	req.SessionID, _ = url.PathUnescape(sessionID)
+	if err := s.service.ExecTTYClose(r.Context(), peerKernelID, req); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }

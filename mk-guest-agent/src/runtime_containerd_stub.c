@@ -1,4 +1,10 @@
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 600
+#endif
+
 #include "mkga_runtime.h"
+#include "mkga_stream.h"
+#include "session.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -8,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -21,6 +28,7 @@
 #define MKGA_CONTAINERD_DEFAULT_RUNC_BINARY "/bin/runc"
 #define MKGA_CONTAINERD_DEFAULT_STATE_ROOT "/run/mk-guest-agent/containerd"
 #define MKGA_CONTAINERD_DEFAULT_TIMEOUT_MS 5000
+#define MKGA_CONTAINERD_STOP_TERM_GRACE_MS 2000
 #define MKGA_CONTAINERD_PULL_TIMEOUT_MS 30000
 #define MKGA_CONTAINERD_READY_POLL_MS 200
 #define MKGA_CONTAINERD_OUTPUT_MAX 4096
@@ -67,10 +75,16 @@ struct mkga_cri_log_stream {
 	size_t pending_len;
 };
 
+struct mkga_exec_tty_waiter_arg {
+	struct mkga_exec_session *session;
+};
+
 static int mkga_cri_log_flush_pending(int fd, struct mkga_cri_log_stream *stream,
 				      char tag);
 static int mkga_cri_log_append_chunk(int fd, struct mkga_cri_log_stream *stream,
 				     const uint8_t *chunk, size_t chunk_len);
+static void *mkga_containerd_exec_tty_output_pump(void *arg);
+static void *mkga_containerd_exec_tty_waiter(void *arg);
 
 static void mkga_copy_string(char *dst, size_t dst_len, const char *src)
 {
@@ -1213,6 +1227,165 @@ static int mkga_containerd_validate_read_log_req(const struct mkga_read_log_req 
 	return 0;
 }
 
+static int mkga_containerd_build_exec_tty_argv(struct mkga_containerd_runtime *impl,
+					       const struct mkga_exec_session *session,
+					       char *argv[],
+					       size_t argv_cap)
+{
+	int argc;
+
+	if (!impl || !session || !argv || argv_cap == 0) {
+		return -EINVAL;
+	}
+	if (session->argv_count == 0 || session->argv_count > MKGA_MAX_ARGV) {
+		return -EINVAL;
+	}
+
+	memset(argv, 0, sizeof(char *) * argv_cap);
+	argc = mkga_ctr_fill_base_args(impl, argv, argv_cap);
+	if (argc < 0) {
+		return argc;
+	}
+
+	argv[argc++] = "tasks";
+	argv[argc++] = "exec";
+	argv[argc++] = "--exec-id";
+	argv[argc++] = (char *)session->exec_id;
+	if (session->tty) {
+		argv[argc++] = "--tty";
+	}
+	argv[argc++] = (char *)session->container_id;
+	argc = mkga_containerd_append_exec_argv(argv, argc, (int)argv_cap,
+					       session->argv_count,
+					       (char (*)[MKGA_MAX_ARG_LEN])session->argv);
+	if (argc < 0) {
+		return argc;
+	}
+	argv[argc] = NULL;
+	return argc;
+}
+
+static void *mkga_containerd_exec_tty_output_pump(void *arg)
+{
+	struct mkga_exec_session *session = arg;
+	uint8_t buf[MKRING_STREAM_MAX_PAYLOAD];
+
+	if (!session) {
+		return NULL;
+	}
+
+	for (;;) {
+		struct pollfd pfd;
+		int master_fd;
+		int state;
+		int rc;
+		ssize_t nread;
+
+		pthread_mutex_lock(&session->lock);
+		master_fd = session->master_fd;
+		state = session->state;
+		pthread_mutex_unlock(&session->lock);
+
+		if (master_fd < 0 || state == MKGA_EXEC_SESSION_EXITED ||
+		    state == MKGA_EXEC_SESSION_CLOSED) {
+			return NULL;
+		}
+
+		memset(&pfd, 0, sizeof(pfd));
+		pfd.fd = master_fd;
+		pfd.events = POLLIN | POLLHUP;
+
+		rc = poll(&pfd, 1, 250);
+		if (rc < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return NULL;
+		}
+		if (rc == 0) {
+			continue;
+		}
+		if ((pfd.revents & POLLIN) == 0) {
+			if ((pfd.revents & POLLHUP) != 0) {
+				return NULL;
+			}
+			continue;
+		}
+
+		nread = read(master_fd, buf, sizeof(buf));
+		if (nread > 0) {
+			(void)fprintf(stderr,
+				      "mkga exec_tty_output session=%s bytes=%zd\n",
+				      session->session_id,
+				      nread);
+			(void)mkga_stream_send_output(session->session_id, buf, (size_t)nread);
+			continue;
+		}
+		if (nread == 0) {
+			return NULL;
+		}
+		if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+			continue;
+		}
+		return NULL;
+	}
+}
+
+static void *mkga_containerd_exec_tty_waiter(void *arg)
+{
+	struct mkga_exec_tty_waiter_arg *waiter = arg;
+	struct mkga_exec_session *session;
+	int status = 0;
+	int exit_code = 0;
+
+	if (!waiter) {
+		return NULL;
+	}
+	session = waiter->session;
+	free(waiter);
+	if (!session) {
+		return NULL;
+	}
+
+	for (;;) {
+		pid_t rc;
+
+		rc = waitpid(session->child_pid, &status, 0);
+		if (rc >= 0) {
+			break;
+		}
+		if (errno != EINTR) {
+			status = 0;
+			break;
+		}
+	}
+
+	if (WIFEXITED(status)) {
+		exit_code = WEXITSTATUS(status);
+	} else if (WIFSIGNALED(status)) {
+		exit_code = 128 + WTERMSIG(status);
+	}
+	(void)fprintf(stderr,
+		      "mkga exec_tty_waiter session=%s exit_code=%d status=0x%x\n",
+		      session->session_id,
+		      exit_code,
+		      status);
+
+	pthread_mutex_lock(&session->lock);
+	if (session->master_fd >= 0) {
+		(void)close(session->master_fd);
+		session->master_fd = -1;
+	}
+	session->child_pid = -1;
+	session->exit_code = exit_code;
+	if (session->state != MKGA_EXEC_SESSION_CLOSED) {
+		session->state = MKGA_EXEC_SESSION_EXITED;
+	}
+	pthread_mutex_unlock(&session->lock);
+	(void)mkga_stream_send_exit(session->session_id, exit_code);
+	return NULL;
+}
+
 static bool mkga_containerd_image_present(struct mkga_containerd_runtime *impl,
 					  const char *image)
 {
@@ -1443,21 +1616,14 @@ static int mkga_containerd_query_task_status(struct mkga_containerd_runtime *imp
 	return 0;
 }
 
-static int mkga_containerd_poll_for_exit(struct mkga_containerd_runtime *impl,
-					 const char *container_id,
-					 int timeout_ms,
-					 int32_t *exit_code)
+static int mkga_containerd_poll_for_exit_until(struct mkga_containerd_runtime *impl,
+					       const char *container_id,
+					       int64_t deadline_ms,
+					       int32_t *exit_code)
 {
-	int effective_timeout;
-	int64_t deadline;
-
 	if (!impl || !container_id || !exit_code) {
 		return -EINVAL;
 	}
-
-	effective_timeout = mkga_containerd_effective_timeout(
-		impl, timeout_ms, impl->default_timeout_ms);
-	deadline = mkga_now_monotonic_millis() + effective_timeout;
 
 	for (;;) {
 		enum mkga_containerd_task_status task_status = MKGA_CONTAINERD_TASK_STATUS_UNKNOWN;
@@ -1476,26 +1642,32 @@ static int mkga_containerd_poll_for_exit(struct mkga_containerd_runtime *impl,
 			return -EIO;
 		}
 
-		if (mkga_now_monotonic_millis() >= deadline) {
+		if (mkga_now_monotonic_millis() >= deadline_ms) {
 			return -ETIMEDOUT;
 		}
 		usleep(200U * 1000U);
 	}
 }
 
-static int mkga_containerd_wait_for_exit(struct mkga_containerd_runtime *impl,
-					 const char *container_id,
-					 int timeout_ms,
-					 int32_t *exit_code)
+static int mkga_containerd_wait_for_exit_until(struct mkga_containerd_runtime *impl,
+					       const char *container_id,
+					       int64_t deadline_ms,
+					       int32_t *exit_code)
 {
 	char *argv[MKGA_CONTAINERD_ARGV_MAX];
 	char stdout_buf[MKGA_CONTAINERD_OUTPUT_MAX];
 	char stderr_buf[MKGA_CONTAINERD_OUTPUT_MAX];
 	int argc;
+	int64_t remaining_ms;
 	int rc;
 
 	if (!impl || !container_id || !exit_code) {
 		return -EINVAL;
+	}
+
+	remaining_ms = deadline_ms - mkga_now_monotonic_millis();
+	if (remaining_ms <= 0) {
+		return mkga_containerd_poll_for_exit_until(impl, container_id, deadline_ms, exit_code);
 	}
 
 	memset(argv, 0, sizeof(argv));
@@ -1508,14 +1680,12 @@ static int mkga_containerd_wait_for_exit(struct mkga_containerd_runtime *impl,
 	argv[argc++] = (char *)container_id;
 	argv[argc] = NULL;
 
-	rc = mkga_ctr_exec(impl, argv,
-			   mkga_containerd_effective_timeout(impl, timeout_ms,
-							      impl->default_timeout_ms),
-			   stdout_buf, sizeof(stdout_buf),
+	rc = mkga_ctr_exec(impl, argv, (int)remaining_ms, stdout_buf, sizeof(stdout_buf),
 			   stderr_buf, sizeof(stderr_buf));
 	if (rc != 0) {
 		if (mkga_ctr_wait_unsupported(stdout_buf, stderr_buf)) {
-			return mkga_containerd_poll_for_exit(impl, container_id, timeout_ms, exit_code);
+			return mkga_containerd_poll_for_exit_until(impl, container_id, deadline_ms,
+								   exit_code);
 		}
 		return rc;
 	}
@@ -1531,6 +1701,24 @@ static int mkga_containerd_wait_for_exit(struct mkga_containerd_runtime *impl,
 
 	*exit_code = 0;
 	return 0;
+}
+
+static int mkga_containerd_wait_for_exit(struct mkga_containerd_runtime *impl,
+					 const char *container_id,
+					 int timeout_ms,
+					 int32_t *exit_code)
+{
+	int effective_timeout;
+	int64_t deadline;
+
+	if (!impl || !container_id || !exit_code) {
+		return -EINVAL;
+	}
+
+	effective_timeout = mkga_containerd_effective_timeout(
+		impl, timeout_ms, impl->default_timeout_ms);
+	deadline = mkga_now_monotonic_millis() + effective_timeout;
+	return mkga_containerd_wait_for_exit_until(impl, container_id, deadline, exit_code);
 }
 
 static int mkga_containerd_run_logged_foreground(struct mkga_containerd_runtime *impl,
@@ -1734,6 +1922,7 @@ static int mkga_containerd_signal_task(struct mkga_containerd_runtime *impl,
 	}
 	argv[argc++] = "tasks";
 	argv[argc++] = "kill";
+	argv[argc++] = "--all";
 	argv[argc++] = "-s";
 	argv[argc++] = (char *)signal_name;
 	argv[argc++] = (char *)container_id;
@@ -1854,7 +2043,7 @@ static int mkga_containerd_create_container(struct mkga_runtime *runtime,
 		argv[argc++] = container_id;
 		argc = mkga_containerd_append_exec_argv(argv, argc, MKGA_CONTAINERD_ARGV_MAX,
 					       req->argv_count,
-					       (char (*)[MKGA_MAX_ARG_LEN])req->argv);
+					       meta.argv);
 		if (argc < 0) {
 			return argc;
 		}
@@ -1961,6 +2150,8 @@ static int mkga_containerd_stop_container(struct mkga_runtime *runtime,
 {
 	struct mkga_containerd_runtime *impl;
 	struct mkga_containerd_state state;
+	int64_t deadline_ms;
+	int64_t term_deadline_ms;
 	int timeout_ms;
 	int rc;
 	int32_t exit_code = 0;
@@ -1977,6 +2168,11 @@ static int mkga_containerd_stop_container(struct mkga_runtime *runtime,
 
 	timeout_ms = mkga_containerd_effective_timeout(
 		impl, req->timeout_millis, impl->default_timeout_ms);
+	deadline_ms = mkga_now_monotonic_millis() + timeout_ms;
+	term_deadline_ms = deadline_ms;
+	if (timeout_ms > MKGA_CONTAINERD_STOP_TERM_GRACE_MS) {
+		term_deadline_ms = mkga_now_monotonic_millis() + MKGA_CONTAINERD_STOP_TERM_GRACE_MS;
+	}
 
 	rc = mkga_containerd_signal_task(impl, req->container_id, "SIGTERM");
 	if (rc == -ENOENT) {
@@ -1988,11 +2184,11 @@ static int mkga_containerd_stop_container(struct mkga_runtime *runtime,
 	}
 
 	if (impl->start_via_run) {
-		rc = mkga_containerd_poll_for_exit(impl, req->container_id, timeout_ms,
-						   &exit_code);
+		rc = mkga_containerd_poll_for_exit_until(impl, req->container_id, term_deadline_ms,
+							 &exit_code);
 	} else {
-		rc = mkga_containerd_wait_for_exit(impl, req->container_id, timeout_ms,
-						   &exit_code);
+		rc = mkga_containerd_wait_for_exit_until(impl, req->container_id, term_deadline_ms,
+							 &exit_code);
 	}
 	if (rc == -ETIMEDOUT) {
 		rc = mkga_containerd_signal_task(impl, req->container_id, "SIGKILL");
@@ -2000,13 +2196,11 @@ static int mkga_containerd_stop_container(struct mkga_runtime *runtime,
 			return rc;
 		}
 		if (impl->start_via_run) {
-			rc = mkga_containerd_poll_for_exit(impl, req->container_id,
-							   impl->default_timeout_ms,
-							   &exit_code);
+			rc = mkga_containerd_poll_for_exit_until(impl, req->container_id, deadline_ms,
+								 &exit_code);
 		} else {
-			rc = mkga_containerd_wait_for_exit(impl, req->container_id,
-							   impl->default_timeout_ms,
-							   &exit_code);
+			rc = mkga_containerd_wait_for_exit_until(impl, req->container_id, deadline_ms,
+								 &exit_code);
 		}
 	}
 	if (rc != 0) {
@@ -2220,6 +2414,283 @@ static int mkga_containerd_read_log(struct mkga_runtime *runtime,
 	return 0;
 }
 
+static int mkga_containerd_exec_tty_prepare(struct mkga_runtime *runtime,
+					    const struct mkga_exec_tty_prepare_req *req,
+					    struct mkga_exec_tty_prepare_resp *resp)
+{
+	(void)runtime;
+	return mkga_session_prepare(req, resp);
+}
+
+static int mkga_containerd_exec_tty_start(struct mkga_runtime *runtime,
+					  const struct mkga_exec_session_control_req *req)
+{
+	struct mkga_containerd_runtime *impl;
+	struct mkga_exec_session *session;
+	struct mkga_exec_tty_waiter_arg *waiter = NULL;
+	struct winsize ws = {
+		.ws_row = 24,
+		.ws_col = 80,
+	};
+	char *argv[MKGA_CONTAINERD_ARGV_MAX];
+	char *slave_name = NULL;
+	enum mkga_containerd_task_status task_status = MKGA_CONTAINERD_TASK_STATUS_UNKNOWN;
+	int32_t pid = 0;
+	pid_t child;
+	int master_fd = -1;
+	int rc;
+
+	if (!runtime || !req || !runtime->impl) {
+		return -EINVAL;
+	}
+	impl = runtime->impl;
+	if (req->session_id[0] == '\0') {
+		return -EINVAL;
+	}
+
+	rc = mkga_stream_ensure_started();
+	if (rc != 0) {
+		(void)fprintf(stderr,
+			      "mkga exec_tty_start session=%s stream_start_rc=%d\n",
+			      req->session_id,
+			      rc);
+		return rc;
+	}
+
+	session = mkga_session_lookup(req->session_id);
+	if (!session) {
+		(void)fprintf(stderr,
+			      "mkga exec_tty_start session=%s missing_session\n",
+			      req->session_id);
+		return -ENOENT;
+	}
+
+	pthread_mutex_lock(&session->lock);
+	if (session->state == MKGA_EXEC_SESSION_RUNNING) {
+		pthread_mutex_unlock(&session->lock);
+		return 0;
+	}
+	if (session->state != MKGA_EXEC_SESSION_PREPARED) {
+		pthread_mutex_unlock(&session->lock);
+		return -EINVAL;
+	}
+	if (session->exec_id[0] == '\0') {
+		(void)snprintf(session->exec_id, sizeof(session->exec_id),
+			       "%s", session->session_id);
+	}
+	pthread_mutex_unlock(&session->lock);
+
+	rc = mkga_containerd_query_task_status(impl, session->container_id, &task_status, &pid);
+	if (rc != 0) {
+		(void)fprintf(stderr,
+			      "mkga exec_tty_start session=%s container=%s status_query_rc=%d\n",
+			      session->session_id,
+			      session->container_id,
+			      rc);
+		return rc;
+	}
+	switch (task_status) {
+	case MKGA_CONTAINERD_TASK_STATUS_RUNNING:
+		(void)fprintf(stderr,
+			      "mkga exec_tty_start session=%s container=%s task_running pid=%d\n",
+			      session->session_id,
+			      session->container_id,
+			      pid);
+		break;
+	case MKGA_CONTAINERD_TASK_STATUS_STOPPED:
+	case MKGA_CONTAINERD_TASK_STATUS_MISSING:
+		(void)fprintf(stderr,
+			      "mkga exec_tty_start session=%s container=%s task_not_running status=%d pid=%d\n",
+			      session->session_id,
+			      session->container_id,
+			      (int)task_status,
+			      pid);
+		return -ENOENT;
+	default:
+		(void)fprintf(stderr,
+			      "mkga exec_tty_start session=%s container=%s task_status_unknown status=%d pid=%d\n",
+			      session->session_id,
+			      session->container_id,
+			      (int)task_status,
+			      pid);
+		return -EIO;
+	}
+
+	rc = mkga_containerd_build_exec_tty_argv(impl, session, argv, MKGA_CONTAINERD_ARGV_MAX);
+	if (rc < 0) {
+		return rc;
+	}
+
+	master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+	if (master_fd < 0) {
+		return -errno;
+	}
+	if (grantpt(master_fd) != 0 || unlockpt(master_fd) != 0) {
+		rc = -errno;
+		(void)close(master_fd);
+		return rc;
+	}
+	slave_name = ptsname(master_fd);
+	if (!slave_name) {
+		rc = -errno;
+		(void)close(master_fd);
+		return rc;
+	}
+	if (ioctl(master_fd, TIOCSWINSZ, &ws) != 0) {
+		rc = -errno;
+		(void)close(master_fd);
+		return rc;
+	}
+
+	child = fork();
+	if (child < 0) {
+		rc = -errno;
+		(void)close(master_fd);
+		return rc;
+	}
+	if (child == 0) {
+		int slave_fd;
+
+		(void)setsid();
+		slave_fd = open(slave_name, O_RDWR);
+		if (slave_fd < 0) {
+			_exit(errno == ENOENT ? 127 : 126);
+		}
+		(void)ioctl(slave_fd, TIOCSCTTY, 0);
+		(void)dup2(slave_fd, STDIN_FILENO);
+		(void)dup2(slave_fd, STDOUT_FILENO);
+		(void)dup2(slave_fd, STDERR_FILENO);
+		if (slave_fd > STDERR_FILENO) {
+			(void)close(slave_fd);
+		}
+		(void)close(master_fd);
+		(void)setenv("TERM", "xterm", 0);
+		execvp(argv[0], argv);
+		_exit(errno == ENOENT ? 127 : 126);
+	}
+
+	rc = mkga_set_nonblock(master_fd);
+	if (rc != 0) {
+		(void)kill(child, SIGKILL);
+		(void)waitpid(child, NULL, 0);
+		(void)close(master_fd);
+		return rc;
+	}
+
+	waiter = calloc(1, sizeof(*waiter));
+	if (!waiter) {
+		(void)kill(child, SIGKILL);
+		(void)waitpid(child, NULL, 0);
+		(void)close(master_fd);
+		return -ENOMEM;
+	}
+	waiter->session = session;
+
+	pthread_mutex_lock(&session->lock);
+	session->master_fd = master_fd;
+	session->child_pid = child;
+	session->exit_code = 0;
+	session->state = MKGA_EXEC_SESSION_RUNNING;
+	pthread_mutex_unlock(&session->lock);
+
+	rc = pthread_create(&session->io_thread, NULL, mkga_containerd_exec_tty_output_pump, session);
+	if (rc != 0) {
+		pthread_mutex_lock(&session->lock);
+		session->state = MKGA_EXEC_SESSION_PREPARED;
+		session->master_fd = -1;
+		session->child_pid = -1;
+		pthread_mutex_unlock(&session->lock);
+		free(waiter);
+		(void)kill(child, SIGKILL);
+		(void)waitpid(child, NULL, 0);
+		(void)close(master_fd);
+		return -rc;
+	}
+	(void)pthread_detach(session->io_thread);
+	rc = pthread_create(&session->wait_thread, NULL, mkga_containerd_exec_tty_waiter, waiter);
+	if (rc != 0) {
+		pthread_mutex_lock(&session->lock);
+		session->state = MKGA_EXEC_SESSION_PREPARED;
+		session->master_fd = -1;
+		session->child_pid = -1;
+		pthread_mutex_unlock(&session->lock);
+		free(waiter);
+		(void)kill(child, SIGKILL);
+		(void)waitpid(child, NULL, 0);
+		(void)close(master_fd);
+		return -rc;
+	}
+	(void)pthread_detach(session->wait_thread);
+	return 0;
+}
+
+static int mkga_containerd_exec_tty_resize(struct mkga_runtime *runtime,
+					   const struct mkga_exec_tty_resize_req *req)
+{
+	struct mkga_exec_session *session;
+	struct winsize ws;
+	int master_fd;
+
+	(void)runtime;
+	if (!req || req->session_id[0] == '\0' || req->width == 0 || req->height == 0) {
+		return -EINVAL;
+	}
+
+	session = mkga_session_lookup(req->session_id);
+	if (!session) {
+		return -ENOENT;
+	}
+
+	pthread_mutex_lock(&session->lock);
+	if (session->master_fd < 0 || session->state != MKGA_EXEC_SESSION_RUNNING) {
+		pthread_mutex_unlock(&session->lock);
+		return -EINVAL;
+	}
+	master_fd = session->master_fd;
+	pthread_mutex_unlock(&session->lock);
+
+	memset(&ws, 0, sizeof(ws));
+	ws.ws_col = (unsigned short)req->width;
+	ws.ws_row = (unsigned short)req->height;
+	if (ioctl(master_fd, TIOCSWINSZ, &ws) != 0) {
+		return -errno;
+	}
+	return 0;
+}
+
+static int mkga_containerd_exec_tty_close(struct mkga_runtime *runtime,
+					  const struct mkga_exec_session_control_req *req)
+{
+	struct mkga_exec_session *session;
+	pid_t child_pid = -1;
+
+	(void)runtime;
+	if (!req || req->session_id[0] == '\0') {
+		return -EINVAL;
+	}
+
+	session = mkga_session_lookup(req->session_id);
+	if (!session) {
+		return -ENOENT;
+	}
+
+	pthread_mutex_lock(&session->lock);
+	child_pid = session->child_pid;
+	session->state = MKGA_EXEC_SESSION_CLOSED;
+	if (session->master_fd >= 0) {
+		(void)close(session->master_fd);
+		session->master_fd = -1;
+	}
+	pthread_mutex_unlock(&session->lock);
+
+	if (child_pid > 0) {
+		if (kill(child_pid, SIGHUP) != 0 && errno != ESRCH) {
+			return -errno;
+		}
+	}
+	return 0;
+}
+
 static void mkga_containerd_destroy(struct mkga_runtime *runtime)
 {
 	if (!runtime) {
@@ -2236,6 +2707,10 @@ static const struct mkga_runtime_ops mkga_containerd_ops = {
 	.remove_container = mkga_containerd_remove_container,
 	.status_container = mkga_containerd_status_container,
 	.read_log = mkga_containerd_read_log,
+	.exec_tty_prepare = mkga_containerd_exec_tty_prepare,
+	.exec_tty_start = mkga_containerd_exec_tty_start,
+	.exec_tty_resize = mkga_containerd_exec_tty_resize,
+	.exec_tty_close = mkga_containerd_exec_tty_close,
 	.destroy = mkga_containerd_destroy,
 };
 

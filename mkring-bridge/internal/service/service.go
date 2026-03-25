@@ -140,3 +140,72 @@ func (s *Service) ReadLog(ctx context.Context, peerKernelID uint16, payload prot
 	}
 	return result, nil
 }
+
+func (s *Service) ExecTTYPrepare(ctx context.Context, peerKernelID uint16, payload protocol.ExecTTYPreparePayload) (protocol.ExecTTYPrepareResult, error) {
+	req, err := protocol.NewRequest(newRequestID(), peerKernelID, payload.KernelID, protocol.OpExecTTYPrepare, payload)
+	if err != nil {
+		return protocol.ExecTTYPrepareResult{}, err
+	}
+
+	resp, err := s.transport.RoundTrip(ctx, peerKernelID, req)
+	if err != nil {
+		return protocol.ExecTTYPrepareResult{}, err
+	}
+	if resp.Error != nil {
+		return protocol.ExecTTYPrepareResult{}, fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+	}
+
+	var result protocol.ExecTTYPrepareResult
+	if err := protocol.DecodePayload(resp, &result); err != nil {
+		return protocol.ExecTTYPrepareResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Service) ExecTTYStart(ctx context.Context, peerKernelID uint16, payload protocol.ExecTTYStartPayload) error {
+	req, err := protocol.NewRequest(newRequestID(), peerKernelID, payload.KernelID, protocol.OpExecTTYStart, payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := s.transport.RoundTrip(ctx, peerKernelID, req)
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+	}
+	return nil
+}
+
+func (s *Service) ExecTTYResize(ctx context.Context, peerKernelID uint16, payload protocol.ExecTTYResizePayload) error {
+	req, err := protocol.NewRequest(newRequestID(), peerKernelID, payload.KernelID, protocol.OpExecTTYResize, payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := s.transport.RoundTrip(ctx, peerKernelID, req)
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+	}
+	return nil
+}
+
+func (s *Service) ExecTTYClose(ctx context.Context, peerKernelID uint16, payload protocol.ExecTTYClosePayload) error {
+	req, err := protocol.NewRequest(newRequestID(), peerKernelID, payload.KernelID, protocol.OpExecTTYClose, payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := s.transport.RoundTrip(ctx, peerKernelID, req)
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+	}
+	return nil
+}
