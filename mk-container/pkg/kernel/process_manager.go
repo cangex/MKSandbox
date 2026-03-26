@@ -43,16 +43,29 @@ func splitCommand(command string) (string, []string, error) {
 	return parts[0], parts[1:], nil
 }
 
-func (m *ProcessManager) runKernelCommand(ctx context.Context, command, kernelID string, peerKernelID uint16) error {
+func normalizeBootMode(mode BootMode) BootMode {
+	switch mode {
+	case BootModeSnapshot:
+		return BootModeSnapshot
+	case BootModeColdBoot, "":
+		return BootModeColdBoot
+	default:
+		return BootModeColdBoot
+	}
+}
+
+func (m *ProcessManager) runKernelCommand(ctx context.Context, command, kernelID string, peerKernelID uint16, bootMode BootMode) error {
 	bin, args, err := splitCommand(command)
 	if err != nil {
 		return err
 	}
 
 	cmd := exec.CommandContext(ctx, bin, args...)
+	bootMode = normalizeBootMode(bootMode)
 	cmd.Env = append(os.Environ(),
 		"MK_KERNEL_ID="+kernelID,
 		"MK_KERNEL_PEER_ID="+strconv.FormatUint(uint64(peerKernelID), 10),
+		"MK_KERNEL_BOOT_MODE="+string(bootMode),
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -69,8 +82,9 @@ func (m *ProcessManager) kernelEndpoint(kernelID string, peerKernelID uint16) st
 }
 
 func (m *ProcessManager) StartKernel(ctx context.Context, req StartRequest) (KernelInstance, error) {
+	bootMode := normalizeBootMode(req.BootMode)
 	if m.startCommand != "" {
-		if err := m.runKernelCommand(ctx, m.startCommand, req.KernelID, req.PeerKernelID); err != nil {
+		if err := m.runKernelCommand(ctx, m.startCommand, req.KernelID, req.PeerKernelID, bootMode); err != nil {
 			return KernelInstance{}, err
 		}
 	}
@@ -80,9 +94,10 @@ func (m *ProcessManager) StartKernel(ctx context.Context, req StartRequest) (Ker
 	m.startedKernelsMux.Unlock()
 
 	return KernelInstance{
-		KernelID:     req.KernelID,
-		PeerKernelID: req.PeerKernelID,
-		Endpoint:     m.kernelEndpoint(req.KernelID, req.PeerKernelID),
+		KernelID:      req.KernelID,
+		PeerKernelID:  req.PeerKernelID,
+		Endpoint:      m.kernelEndpoint(req.KernelID, req.PeerKernelID),
+		SkipWaitReady: bootMode == BootModeSnapshot,
 	}, nil
 }
 
@@ -99,7 +114,7 @@ func (m *ProcessManager) StopKernel(ctx context.Context, kernelID string) error 
 	}
 
 	if m.stopCommand != "" {
-		if err := m.runKernelCommand(ctx, m.stopCommand, kernelID, started.peerKernelID); err != nil {
+		if err := m.runKernelCommand(ctx, m.stopCommand, kernelID, started.peerKernelID, BootModeColdBoot); err != nil {
 			return err
 		}
 	}

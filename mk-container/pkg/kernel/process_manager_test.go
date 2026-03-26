@@ -11,6 +11,7 @@ func TestProcessManagerStartKernelMkringEndpoint(t *testing.T) {
 	instance, err := m.StartKernel(context.Background(), StartRequest{
 		KernelID:     "kernel-a",
 		PeerKernelID: 7,
+		BootMode:     BootModeColdBoot,
 	})
 	if err != nil {
 		t.Fatalf("start kernel: %v", err)
@@ -21,5 +22,25 @@ func TestProcessManagerStartKernelMkringEndpoint(t *testing.T) {
 	}
 	if instance.PeerKernelID != 7 {
 		t.Fatalf("unexpected peer kernel id: %d", instance.PeerKernelID)
+	}
+	if instance.SkipWaitReady {
+		t.Fatalf("did not expect skip wait ready for cold boot")
+	}
+}
+
+func TestProcessManagerMarksSnapshotBootToSkipWaitReady(t *testing.T) {
+	m := NewProcessManager("", "", "unix:///ignored/%s.sock", "mkring")
+
+	instance, err := m.StartKernel(context.Background(), StartRequest{
+		KernelID:     "kernel-a",
+		PeerKernelID: 7,
+		BootMode:     BootModeSnapshot,
+	})
+	if err != nil {
+		t.Fatalf("start kernel: %v", err)
+	}
+
+	if !instance.SkipWaitReady {
+		t.Fatalf("expected snapshot boot to skip wait ready")
 	}
 }

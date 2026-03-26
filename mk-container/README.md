@@ -70,6 +70,10 @@ By default, mkcri listens on `unix:///tmp/mkcri.sock`.
 - `MKCRI_LISTEN_SOCKET` (default: `/tmp/mkcri.sock`)
 - `MKCRI_STREAM_DEVICE_PATH` (default: `/dev/mkring_stream_bridge`)
 - `MK_KERNEL_START_COMMAND` (optional: command for booting a sub-kernel, receives `MK_KERNEL_ID` and `MK_KERNEL_PEER_ID`)
+  - mkcri also exports `MK_KERNEL_BOOT_MODE` to this command
+  - expected values:
+    - `cold_boot`
+    - `snapshot`
 - `MK_KERNEL_STOP_COMMAND` (optional: command for stopping a sub-kernel)
 - `MK_CONTROL_TRANSPORT` (default: `mock`, supported: `mock`, `mkring`)
 - `MK_MKRING_BRIDGE_SOCKET` (default: `/run/mk-container/mkring-bridge.sock`)
@@ -81,6 +85,13 @@ By default, mkcri listens on `unix:///tmp/mkcri.sock`.
 - `MK_RUNTIME_VERSION` (default: `0.1.0`)
 
 When `MK_CONTROL_TRANSPORT=mkring`, `mkcri` allocates a numeric peer-kernel-id for each sub-kernel and exports it to start/stop commands as `MK_KERNEL_PEER_ID`. Boot scripts should wire that value to the guest kernel's `mkring.kernel_id`.
+
+Per-pod boot mode is selected through the pod sandbox annotation:
+
+- `mksandbox.io/kernel-boot-mode=cold_boot`
+- `mksandbox.io/kernel-boot-mode=snapshot`
+
+If the annotation is omitted, `cold_boot` is used.
 
 ## Next Steps
 

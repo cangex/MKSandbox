@@ -15,16 +15,19 @@ import (
 )
 
 type fakeKernelManager struct {
-	stopCalls []string
-	stopStart chan struct{}
-	stopBlock chan struct{}
+	stopCalls        []string
+	stopStart        chan struct{}
+	stopBlock        chan struct{}
+	lastStartRequest kernel.StartRequest
 }
 
 func (f *fakeKernelManager) StartKernel(_ context.Context, req kernel.StartRequest) (kernel.KernelInstance, error) {
+	f.lastStartRequest = req
 	return kernel.KernelInstance{
-		KernelID:     req.KernelID,
-		PeerKernelID: req.PeerKernelID,
-		Endpoint:     "mkring://7?kernel_id=" + req.KernelID,
+		KernelID:      req.KernelID,
+		PeerKernelID:  req.PeerKernelID,
+		Endpoint:      "mkring://7?kernel_id=" + req.KernelID,
+		SkipWaitReady: req.BootMode == kernel.BootModeSnapshot,
 	}, nil
 }
 
@@ -43,18 +46,18 @@ func (f *fakeKernelManager) StopKernel(_ context.Context, kernelID string) error
 }
 
 type readyClient struct {
-	waitErr    error
-	waitCalls  int
-	containers map[string]struct{}
-	status     *agent.ContainerStatus
-	logChunk   *agent.LogChunk
-	stopErr    error
-	stopCode   int32
-	stopStart  chan struct{}
-	stopBlock  chan struct{}
+	waitErr     error
+	waitCalls   int
+	containers  map[string]struct{}
+	status      *agent.ContainerStatus
+	logChunk    *agent.LogChunk
+	stopErr     error
+	stopCode    int32
+	stopStart   chan struct{}
+	stopBlock   chan struct{}
 	stopTimeout time.Duration
-	mu         sync.Mutex
-	stopped    bool
+	mu          sync.Mutex
+	stopped     bool
 }
 
 func (c *readyClient) WaitReady(_ context.Context) error {
@@ -252,6 +255,27 @@ func TestRunPodWaitsForGuestReady(t *testing.T) {
 
 	if client.waitCalls != 1 {
 		t.Fatalf("expected wait ready to be called once, got %d", client.waitCalls)
+	}
+}
+
+func TestRunPodSkipsWaitReadyWhenKernelInstanceRequestsIt(t *testing.T) {
+	client := &readyClient{}
+	e, km, _ := newTestEngineWithFactory(t, &readyFactory{client: client})
+
+	if _, err := e.RunPod(context.Background(), PodSpec{
+		Name:        "p",
+		Namespace:   "default",
+		UID:         "u1",
+		Annotations: map[string]string{podAnnotationKernelBootMode: string(kernel.BootModeSnapshot)},
+	}); err != nil {
+		t.Fatalf("run pod: %v", err)
+	}
+
+	if client.waitCalls != 0 {
+		t.Fatalf("expected wait ready to be skipped, got %d calls", client.waitCalls)
+	}
+	if km.lastStartRequest.BootMode != kernel.BootModeSnapshot {
+		t.Fatalf("expected snapshot boot mode, got %q", km.lastStartRequest.BootMode)
 	}
 }
 

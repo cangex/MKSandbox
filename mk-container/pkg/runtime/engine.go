@@ -74,6 +74,7 @@ type containerMonitor struct {
 }
 
 const stopContainerResponseBudget = 1500 * time.Millisecond
+const podAnnotationKernelBootMode = "mksandbox.io/kernel-boot-mode"
 
 func NewEngine(km kernel.Manager, af agent.Factory, allocator *util.IPAllocator, kernelIDAlloc *util.IntAllocator) *Engine {
 	e := &Engine{
@@ -113,6 +114,20 @@ func copySlice(in []string) []string {
 	out := make([]string, len(in))
 	copy(out, in)
 	return out
+}
+
+func kernelBootModeForPod(annotations map[string]string) kernel.BootMode {
+	if annotations == nil {
+		return kernel.BootModeColdBoot
+	}
+	switch annotations[podAnnotationKernelBootMode] {
+	case string(kernel.BootModeSnapshot):
+		return kernel.BootModeSnapshot
+	case "", string(kernel.BootModeColdBoot):
+		return kernel.BootModeColdBoot
+	default:
+		return kernel.BootModeColdBoot
+	}
 }
 
 func (e *Engine) waitForPodCleanupLocked(podID string) {
@@ -322,16 +337,19 @@ func (e *Engine) RunPod(ctx context.Context, spec PodSpec) (_ *model.Pod, err er
 		PodID:        podID,
 		Namespace:    spec.Namespace,
 		Name:         spec.Name,
+		BootMode:     kernelBootModeForPod(spec.Annotations),
 	})
 	if err != nil {
 		e.kernelIDAlloc.Release(peerKernelID)
 		return nil, err
 	}
 
-	if err := e.agentFactory.ForKernel(kernelID, instance.Endpoint).WaitReady(ctx); err != nil {
-		_ = e.kernelManager.StopKernel(context.Background(), kernelID)
-		e.kernelIDAlloc.Release(peerKernelID)
-		return nil, fmt.Errorf("wait for guest ready: %w", err)
+	if !instance.SkipWaitReady {
+		if err := e.agentFactory.ForKernel(kernelID, instance.Endpoint).WaitReady(ctx); err != nil {
+			_ = e.kernelManager.StopKernel(context.Background(), kernelID)
+			e.kernelIDAlloc.Release(peerKernelID)
+			return nil, fmt.Errorf("wait for guest ready: %w", err)
+		}
 	}
 
 	ip, err := e.podIPAllocator.Allocate()
