@@ -184,8 +184,15 @@ struct mkring_container_set_ready {
 	char runtime_name[MKRING_CONTAINER_MAX_RUNTIME_NAME];
 } __attribute__((packed));
 
+struct mkring_container_force_peer_ready {
+	uint16_t peer_kernel_id;
+	uint16_t reserved0;
+} __attribute__((packed));
+
 #define MKRING_CONTAINER_IOC_MAGIC               0xB7
 #define MKRING_CONTAINER_IOC_SET_READY \
 	_IOW(MKRING_CONTAINER_IOC_MAGIC, 0x02, struct mkring_container_set_ready)
+#define MKRING_CONTAINER_IOC_FORCE_PEER_READY \
+	_IOW(MKRING_CONTAINER_IOC_MAGIC, 0x04, struct mkring_container_force_peer_ready)
 
 #endif

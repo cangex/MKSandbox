@@ -12,5 +12,6 @@ import (
 // adapter, miscdevice, or another syscall boundary.
 type Transport interface {
 	WaitReady(ctx context.Context, peerKernelID uint16, kernelID string, timeout time.Duration) error
+	ForcePeerReady(ctx context.Context, peerKernelID uint16, kernelID string) error
 	RoundTrip(ctx context.Context, peerKernelID uint16, req protocol.Envelope) (protocol.Envelope, error)
 }

@@ -601,6 +601,23 @@ static long mkrc_ioctl_set_ready(struct mkrc_ctx *ctx, unsigned long arg)
 	return mkrc_send_packet(ctx, req.peer_kernel_id, &msg);
 }
 
+static long mkrc_ioctl_force_peer_ready(struct mkrc_ctx *ctx, unsigned long arg)
+{
+	struct mkring_container_force_peer_ready req;
+
+	if (ctx->role != MKRC_ROLE_HOST)
+		return -EINVAL;
+	if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+		return -EFAULT;
+	if (!mkrc_valid_peer(ctx, req.peer_kernel_id))
+		return -EINVAL;
+
+	ctx->peer_ready[req.peer_kernel_id] = true;
+	wake_up_interruptible(&ctx->ready_wq);
+	pr_info("%s: force-marked peer=%u ready\n", MKRC_NAME, req.peer_kernel_id);
+	return 0;
+}
+
 static long mkrc_ioctl_call(struct mkrc_ctx *ctx, unsigned long arg)
 {
 	struct mkring_container_call call;
@@ -698,6 +715,8 @@ static long mkrc_unlocked_ioctl(struct file *file, unsigned int cmd,
 		return mkrc_ioctl_wait_ready(ctx, arg);
 	case MKRING_CONTAINER_IOC_SET_READY:
 		return mkrc_ioctl_set_ready(ctx, arg);
+	case MKRING_CONTAINER_IOC_FORCE_PEER_READY:
+		return mkrc_ioctl_force_peer_ready(ctx, arg);
 	case MKRING_CONTAINER_IOC_CALL:
 		return mkrc_ioctl_call(ctx, arg);
 	default:

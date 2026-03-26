@@ -53,6 +53,7 @@ const (
 	containerPayloadSize                = 968
 	containerMessageSize                = 996
 	containerWaitReadySize              = 12
+	containerForcePeerReadySize         = 4
 	containerCallSize                   = 2004
 	containerCreateRequestSize          = 968
 	containerControlRequestSize         = 136
@@ -87,6 +88,10 @@ const (
 		(mkringContainerIOCMagic << iocTypeShift) |
 		(0x01 << iocNRShift) |
 		(containerWaitReadySize << iocSizeShift))
+	ioctlForcePeerReady = uintptr((iocWrite << iocDirShift) |
+		(mkringContainerIOCMagic << iocTypeShift) |
+		(0x04 << iocNRShift) |
+		(containerForcePeerReadySize << iocSizeShift))
 	ioctlCall = uintptr(((iocRead | iocWrite) << iocDirShift) |
 		(mkringContainerIOCMagic << iocTypeShift) |
 		(0x03 << iocNRShift) |
@@ -130,6 +135,11 @@ type containerWaitReady struct {
 	Reserved0    uint16
 	TimeoutMS    uint32
 	Ready        uint32
+}
+
+type containerForcePeerReady struct {
+	PeerKernelID uint16
+	Reserved0    uint16
 }
 
 type containerCall struct {
@@ -270,6 +280,26 @@ func (t *DeviceTransport) WaitReady(ctx context.Context, peerKernelID uint16, ke
 	if result.Ready == 0 {
 		return fmt.Errorf("wait ready peer=%d kernel=%s via %s returned not ready", peerKernelID, kernelID, t.devicePath)
 	}
+	return nil
+}
+
+func (t *DeviceTransport) ForcePeerReady(ctx context.Context, peerKernelID uint16, kernelID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	arg := containerForcePeerReady{
+		PeerKernelID: peerKernelID,
+	}
+	buf, err := encodeStruct(arg, containerForcePeerReadySize)
+	if err != nil {
+		return err
+	}
+
+	if err := t.ioctlOnDevice(ioctlForcePeerReady, buf); err != nil {
+		return fmt.Errorf("force peer ready peer=%d kernel=%s via %s: %w", peerKernelID, kernelID, t.devicePath, err)
+	}
+
 	return nil
 }
 

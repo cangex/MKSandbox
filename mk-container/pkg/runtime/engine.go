@@ -513,6 +513,13 @@ func (e *Engine) CreateContainer(ctx context.Context, spec ContainerSpec) (*mode
 	}
 
 	client := e.agentFactory.ForKernel(kernelObj.ID, kernelObj.Endpoint)
+	if kernelBootModeForPod(pod.Annotations) == kernel.BootModeSnapshot {
+		if ensurer, ok := client.(agent.SnapshotPeerReadyEnsurer); ok {
+			if err := ensurer.ForcePeerReady(ctx); err != nil {
+				return nil, fmt.Errorf("force snapshot peer ready: %w", err)
+			}
+		}
+	}
 	containerID, imageRef, err := client.CreateContainer(ctx, agent.ContainerSpec{
 		PodID:       spec.PodID,
 		Name:        spec.Name,

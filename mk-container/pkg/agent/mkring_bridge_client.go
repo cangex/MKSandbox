@@ -60,6 +60,10 @@ type bridgeWaitReadyRequest struct {
 	TimeoutMillis int64  `json:"timeout_millis,omitempty"`
 }
 
+type bridgeForcePeerReadyRequest struct {
+	KernelID string `json:"kernel_id"`
+}
+
 type bridgeContainerControlRequest struct {
 	KernelID      string `json:"kernel_id"`
 	TimeoutMillis int64  `json:"timeout_millis,omitempty"`
@@ -302,6 +306,13 @@ func (c *mkringBridgeClient) WaitReady(ctx context.Context) error {
 		TimeoutMillis: timeoutMillisFromContext(ctx),
 	}
 	return c.doJSON(ctx, http.MethodPost, c.basePath()+"/wait-ready", req, nil)
+}
+
+func (c *mkringBridgeClient) ForcePeerReady(ctx context.Context) error {
+	req := bridgeForcePeerReadyRequest{
+		KernelID: c.kernelID,
+	}
+	return c.doJSON(ctx, http.MethodPost, c.basePath()+"/peer-ready", req, nil)
 }
 
 func (c *mkringBridgeClient) CreateContainer(ctx context.Context, spec ContainerSpec) (string, string, error) {

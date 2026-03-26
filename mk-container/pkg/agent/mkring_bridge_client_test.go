@@ -45,6 +45,19 @@ func TestMkringBridgeClientLifecycle(t *testing.T) {
 						Body:       io.NopCloser(strings.NewReader("")),
 						Header:     make(http.Header),
 					}, nil
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/kernels/7/peer-ready":
+					var req bridgeForcePeerReadyRequest
+					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+						return nil, err
+					}
+					if req.KernelID != "kernel-a" {
+						return nil, errors.New("unexpected peer-ready request")
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("")),
+						Header:     make(http.Header),
+					}, nil
 				case r.Method == http.MethodPost && r.URL.Path == "/v1/kernels/7/containers":
 					var req bridgeCreateContainerRequest
 					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -110,6 +123,10 @@ func TestMkringBridgeClientLifecycle(t *testing.T) {
 
 	if err := client.WaitReady(ctx); err != nil {
 		t.Fatalf("wait ready: %v", err)
+	}
+
+	if err := client.ForcePeerReady(ctx); err != nil {
+		t.Fatalf("force peer ready: %v", err)
 	}
 
 	containerID, imageRef, err := client.CreateContainer(ctx, ContainerSpec{

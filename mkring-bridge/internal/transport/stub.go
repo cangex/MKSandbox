@@ -18,6 +18,10 @@ func (t *StubTransport) WaitReady(_ context.Context, _ uint16, _ string, _ time.
 	return nil
 }
 
+func (t *StubTransport) ForcePeerReady(_ context.Context, _ uint16, _ string) error {
+	return nil
+}
+
 func (t *StubTransport) RoundTrip(_ context.Context, _ uint16, req protocol.Envelope) (protocol.Envelope, error) {
 	switch req.Operation {
 	case protocol.OpCreateContainer:

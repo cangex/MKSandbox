@@ -46,23 +46,29 @@ func (f *fakeKernelManager) StopKernel(_ context.Context, kernelID string) error
 }
 
 type readyClient struct {
-	waitErr     error
-	waitCalls   int
-	containers  map[string]struct{}
-	status      *agent.ContainerStatus
-	logChunk    *agent.LogChunk
-	stopErr     error
-	stopCode    int32
-	stopStart   chan struct{}
-	stopBlock   chan struct{}
-	stopTimeout time.Duration
-	mu          sync.Mutex
-	stopped     bool
+	waitErr         error
+	waitCalls       int
+	forceReadyCalls int
+	containers      map[string]struct{}
+	status          *agent.ContainerStatus
+	logChunk        *agent.LogChunk
+	stopErr         error
+	stopCode        int32
+	stopStart       chan struct{}
+	stopBlock       chan struct{}
+	stopTimeout     time.Duration
+	mu              sync.Mutex
+	stopped         bool
 }
 
 func (c *readyClient) WaitReady(_ context.Context) error {
 	c.waitCalls++
 	return c.waitErr
+}
+
+func (c *readyClient) ForcePeerReady(_ context.Context) error {
+	c.forceReadyCalls++
+	return nil
 }
 
 func (c *readyClient) CreateContainer(_ context.Context, _ agent.ContainerSpec) (string, string, error) {
@@ -224,6 +230,53 @@ func TestEngineLifecycle(t *testing.T) {
 
 	if err := e.RemovePod(ctx, pod.ID); err != nil {
 		t.Fatalf("remove pod: %v", err)
+	}
+}
+
+func TestCreateContainerForSnapshotPodForcesPeerReady(t *testing.T) {
+	client := &readyClient{}
+	e, _, _ := newTestEngineWithFactory(t, &readyFactory{client: client})
+	ctx := context.Background()
+
+	pod, err := e.RunPod(ctx, PodSpec{
+		Name:        "p",
+		Namespace:   "default",
+		UID:         "u1",
+		Annotations: map[string]string{podAnnotationKernelBootMode: string(kernel.BootModeSnapshot)},
+	})
+	if err != nil {
+		t.Fatalf("run pod: %v", err)
+	}
+
+	if _, err := e.CreateContainer(ctx, ContainerSpec{PodID: pod.ID, Name: "c", Image: "busybox"}); err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+
+	if client.forceReadyCalls != 1 {
+		t.Fatalf("expected 1 force-ready call, got %d", client.forceReadyCalls)
+	}
+}
+
+func TestCreateContainerForColdBootPodDoesNotForcePeerReady(t *testing.T) {
+	client := &readyClient{}
+	e, _, _ := newTestEngineWithFactory(t, &readyFactory{client: client})
+	ctx := context.Background()
+
+	pod, err := e.RunPod(ctx, PodSpec{
+		Name:      "p",
+		Namespace: "default",
+		UID:       "u1",
+	})
+	if err != nil {
+		t.Fatalf("run pod: %v", err)
+	}
+
+	if _, err := e.CreateContainer(ctx, ContainerSpec{PodID: pod.ID, Name: "c", Image: "busybox"}); err != nil {
+		t.Fatalf("create container: %v", err)
+	}
+
+	if client.forceReadyCalls != 0 {
+		t.Fatalf("expected 0 force-ready calls, got %d", client.forceReadyCalls)
 	}
 }
 

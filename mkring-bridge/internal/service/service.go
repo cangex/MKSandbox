@@ -29,6 +29,10 @@ func (s *Service) WaitReady(ctx context.Context, peerKernelID uint16, kernelID s
 	return s.transport.WaitReady(ctx, peerKernelID, kernelID, timeout)
 }
 
+func (s *Service) ForcePeerReady(ctx context.Context, peerKernelID uint16, kernelID string) error {
+	return s.transport.ForcePeerReady(ctx, peerKernelID, kernelID)
+}
+
 func (s *Service) CreateContainer(ctx context.Context, peerKernelID uint16, payload protocol.CreateContainerPayload) (protocol.CreateContainerResult, error) {
 	req, err := protocol.NewRequest(newRequestID(), peerKernelID, payload.KernelID, protocol.OpCreateContainer, payload)
 	if err != nil {

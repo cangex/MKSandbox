@@ -34,6 +34,10 @@ type waitReadyRequest struct {
 	TimeoutMillis int64  `json:"timeout_millis,omitempty"`
 }
 
+type forcePeerReadyRequest struct {
+	KernelID string `json:"kernel_id"`
+}
+
 type readLogRequest struct {
 	KernelID string `json:"kernel_id"`
 	Offset   uint64 `json:"offset"`
@@ -129,6 +133,8 @@ func (s *Server) handleKernels(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 2 && parts[1] == "wait-ready" && r.Method == http.MethodPost:
 		s.handleWaitReady(w, r, peerKernelID)
+	case len(parts) == 2 && parts[1] == "peer-ready" && r.Method == http.MethodPost:
+		s.handleForcePeerReady(w, r, peerKernelID)
 	case len(parts) == 2 && parts[1] == "containers" && r.Method == http.MethodPost:
 		s.handleCreateContainer(w, r, peerKernelID)
 	case len(parts) == 4 && parts[1] == "containers" && parts[3] == "start" && r.Method == http.MethodPost:
@@ -166,6 +172,19 @@ func (s *Server) handleWaitReady(w http.ResponseWriter, r *http.Request, peerKer
 	}
 
 	if err := s.service.WaitReady(r.Context(), peerKernelID, req.KernelID, timeout); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleForcePeerReady(w http.ResponseWriter, r *http.Request, peerKernelID uint16) {
+	var req forcePeerReadyRequest
+	if !decodeJSON(w, r, s.cfg.MessageMaxBytes, &req) {
+		return
+	}
+
+	if err := s.service.ForcePeerReady(r.Context(), peerKernelID, req.KernelID); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}

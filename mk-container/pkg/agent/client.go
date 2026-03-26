@@ -78,3 +78,11 @@ type Client interface {
 type Factory interface {
 	ForKernel(kernelID, endpoint string) Client
 }
+
+// SnapshotPeerReadyEnsurer is an optional host-side extension used by the
+// mkring bridge path. Snapshot-based kernel wake currently restores guest
+// execution before host bridge peer readiness, so CreateContainer can ask the
+// bridge to mark the peer ready proactively.
+type SnapshotPeerReadyEnsurer interface {
+	ForcePeerReady(ctx context.Context) error
+}

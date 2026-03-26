@@ -73,6 +73,42 @@ func TestDeviceTransportWaitReady(t *testing.T) {
 	}
 }
 
+func TestDeviceTransportForcePeerReady(t *testing.T) {
+	file := &fakeDeviceFile{fd: 42}
+	transport := NewDeviceTransport("/dev/mkring_container_bridge")
+	transport.open = func(path string) (deviceFile, error) {
+		if path != "/dev/mkring_container_bridge" {
+			t.Fatalf("unexpected device path: %s", path)
+		}
+		return file, nil
+	}
+	transport.ioctl = func(fd uintptr, req uintptr, arg uintptr) error {
+		if fd != file.fd {
+			t.Fatalf("unexpected fd: %d", fd)
+		}
+		if req != ioctlForcePeerReady {
+			t.Fatalf("unexpected ioctl request: %#x", req)
+		}
+
+		buf := argBytes(arg, containerForcePeerReadySize)
+		var mark containerForcePeerReady
+		if err := decodeStruct(buf, &mark); err != nil {
+			t.Fatalf("decode force-peer-ready request: %v", err)
+		}
+		if mark.PeerKernelID != 7 {
+			t.Fatalf("unexpected peer kernel id: %d", mark.PeerKernelID)
+		}
+		return nil
+	}
+
+	if err := transport.ForcePeerReady(context.Background(), 7, "kernel-a"); err != nil {
+		t.Fatalf("ForcePeerReady returned error: %v", err)
+	}
+	if !file.closed {
+		t.Fatalf("device file was not closed")
+	}
+}
+
 func TestDeviceTransportRoundTripCreate(t *testing.T) {
 	file := &fakeDeviceFile{fd: 52}
 	transport := NewDeviceTransport("/dev/mkring_container_bridge")
