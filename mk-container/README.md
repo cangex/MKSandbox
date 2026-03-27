@@ -5,7 +5,7 @@
 The current architecture supports an `mkring`-based host-to-guest chain:
 
 ```text
-mkcri -> host mkring-bridge -> mkring -> guest agent -> containerd
+mkcri -> direct mkring control transport -> mkring -> guest agent -> containerd
 ```
 
 ## What Is Implemented
@@ -17,7 +17,7 @@ mkcri -> host mkring-bridge -> mkring -> guest agent -> containerd
 - Peer-kernel-id allocation for `mkring` control-plane routing.
 - Guest runtime abstraction (`agent.Factory`) with:
   - a runnable mock backend,
-  - an `mkring` bridge client backend.
+  - an in-process `mkring` backend (default and only runtime path).
 - Pod IP allocation.
 - `command/args` passthrough from CRI to the guest `ctr` invocation.
 - Host-side monitor loop for:
@@ -75,8 +75,8 @@ By default, mkcri listens on `unix:///tmp/mkcri.sock`.
     - `cold_boot`
     - `snapshot`
 - `MK_KERNEL_STOP_COMMAND` (optional: command for stopping a sub-kernel)
-- `MK_CONTROL_TRANSPORT` (default: `mock`, supported: `mock`, `mkring`)
-- `MK_MKRING_BRIDGE_SOCKET` (default: `/run/mk-container/mkring-bridge.sock`)
+- `MK_CONTROL_TRANSPORT` (default: `mkring`, supported: `mock`, `mkring`)
+- `MKCRI_CONTROL_DEVICE_PATH` (default: `/dev/mkring_container_bridge`)
 - `MK_KERNEL_PEER_ID_BASE` (default: `1`)
 - `MK_KERNEL_PEER_ID_MAX` (default: `255`)
 - `MK_POD_CIDR_BASE` (default: `10.240.0.0`)

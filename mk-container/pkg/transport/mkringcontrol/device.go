@@ -1,4 +1,4 @@
-package transport
+package mkringcontrol
 
 import (
 	"bytes"
@@ -12,8 +12,6 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
-
-	"mkring-bridge/internal/protocol"
 )
 
 const (
@@ -303,31 +301,31 @@ func (t *DeviceTransport) ForcePeerReady(ctx context.Context, peerKernelID uint1
 	return nil
 }
 
-func (t *DeviceTransport) RoundTrip(ctx context.Context, peerKernelID uint16, req protocol.Envelope) (protocol.Envelope, error) {
+func (t *DeviceTransport) RoundTrip(ctx context.Context, peerKernelID uint16, req Envelope) (Envelope, error) {
 	call, err := t.encodeCall(ctx, peerKernelID, req)
 	if err != nil {
-		return protocol.Envelope{}, err
+		return Envelope{}, err
 	}
 
 	buf, err := encodeStruct(call, containerCallSize)
 	if err != nil {
-		return protocol.Envelope{}, err
+		return Envelope{}, err
 	}
 
 	if err := t.ioctlOnDevice(ioctlCall, buf); err != nil {
-		return protocol.Envelope{}, fmt.Errorf("call peer=%d op=%s via %s: %w", peerKernelID, req.Operation, t.devicePath, err)
+		return Envelope{}, fmt.Errorf("call peer=%d op=%s via %s: %w", peerKernelID, req.Operation, t.devicePath, err)
 	}
 
 	var result containerCall
 	if err := decodeStruct(buf, &result); err != nil {
-		return protocol.Envelope{}, err
+		return Envelope{}, err
 	}
 
 	return decodeResponseEnvelope(req, result)
 }
 
-func (t *DeviceTransport) encodeCall(ctx context.Context, peerKernelID uint16, req protocol.Envelope) (containerCall, error) {
-	if req.Kind != protocol.MessageKindRequest {
+func (t *DeviceTransport) encodeCall(ctx context.Context, peerKernelID uint16, req Envelope) (containerCall, error) {
+	if req.Kind != MessageKindRequest {
 		return containerCall{}, fmt.Errorf("device transport expects request envelope, got %q", req.Kind)
 	}
 
@@ -395,19 +393,19 @@ func effectiveTimeoutMillis(ctx context.Context, timeout time.Duration) (uint32,
 	return uint32(millis), nil
 }
 
-func timeoutMillisForRequest(ctx context.Context, req protocol.Envelope) (uint32, error) {
+func timeoutMillisForRequest(ctx context.Context, req Envelope) (uint32, error) {
 	switch req.Operation {
-	case protocol.OpCreateContainer:
+	case OpCreateContainer:
 		return effectiveTimeoutMillis(ctx, 0)
-	case protocol.OpStartContainer, protocol.OpStopContainer, protocol.OpRemoveContainer, protocol.OpStatusContainer:
-		var payload protocol.ContainerControlPayload
-		if err := protocol.DecodePayload(req, &payload); err != nil {
+	case OpStartContainer, OpStopContainer, OpRemoveContainer, OpStatusContainer:
+		var payload ContainerControlPayload
+		if err := DecodePayload(req, &payload); err != nil {
 			return 0, err
 		}
 		return effectiveTimeoutMillis(ctx, time.Duration(payload.TimeoutMillis)*time.Millisecond)
-	case protocol.OpReadLog:
+	case OpReadLog:
 		return effectiveTimeoutMillis(ctx, 0)
-	case protocol.OpExecTTYPrepare, protocol.OpExecTTYStart, protocol.OpExecTTYResize, protocol.OpExecTTYClose:
+	case OpExecTTYPrepare, OpExecTTYStart, OpExecTTYResize, OpExecTTYClose:
 		return effectiveTimeoutMillis(ctx, 0)
 	default:
 		return 0, fmt.Errorf("unsupported operation %q", req.Operation)
@@ -416,7 +414,7 @@ func timeoutMillisForRequest(ctx context.Context, req protocol.Envelope) (uint32
 	return 0, fmt.Errorf("unsupported operation %q", req.Operation)
 }
 
-func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
+func encodeRequestMessage(req Envelope) (containerMessage, error) {
 	op, err := operationToUAPI(req.Operation)
 	if err != nil {
 		return containerMessage{}, err
@@ -432,9 +430,9 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 	}
 
 	switch req.Operation {
-	case protocol.OpCreateContainer:
-		var payload protocol.CreateContainerPayload
-		if err := protocol.DecodePayload(req, &payload); err != nil {
+	case OpCreateContainer:
+		var payload CreateContainerPayload
+		if err := DecodePayload(req, &payload); err != nil {
 			return containerMessage{}, err
 		}
 		argv := flattenArgv(payload.Command, payload.Args)
@@ -469,9 +467,9 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 		}
 		copy(msg.Payload[:], encoded)
 		msg.Header.PayloadLen = uint32(containerCreateRequestSize)
-	case protocol.OpStartContainer, protocol.OpStopContainer, protocol.OpRemoveContainer, protocol.OpStatusContainer:
-		var payload protocol.ContainerControlPayload
-		if err := protocol.DecodePayload(req, &payload); err != nil {
+	case OpStartContainer, OpStopContainer, OpRemoveContainer, OpStatusContainer:
+		var payload ContainerControlPayload
+		if err := DecodePayload(req, &payload); err != nil {
 			return containerMessage{}, err
 		}
 		control := containerControlRequest{TimeoutMillis: payload.TimeoutMillis}
@@ -487,9 +485,9 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 		}
 		copy(msg.Payload[:], encoded)
 		msg.Header.PayloadLen = uint32(containerControlRequestSize)
-	case protocol.OpReadLog:
-		var payload protocol.ReadLogPayload
-		if err := protocol.DecodePayload(req, &payload); err != nil {
+	case OpReadLog:
+		var payload ReadLogPayload
+		if err := DecodePayload(req, &payload); err != nil {
 			return containerMessage{}, err
 		}
 		readLog := containerReadLogRequest{
@@ -508,9 +506,9 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 		}
 		copy(msg.Payload[:], encoded)
 		msg.Header.PayloadLen = uint32(containerReadLogRequestSize)
-	case protocol.OpExecTTYPrepare:
-		var payload protocol.ExecTTYPreparePayload
-		if err := protocol.DecodePayload(req, &payload); err != nil {
+	case OpExecTTYPrepare:
+		var payload ExecTTYPreparePayload
+		if err := DecodePayload(req, &payload); err != nil {
 			return containerMessage{}, err
 		}
 		if len(payload.Command) > mkringContainerMaxArgv {
@@ -540,9 +538,9 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 		}
 		copy(msg.Payload[:], encoded)
 		msg.Header.PayloadLen = uint32(containerExecTTYPrepareRequestSize)
-	case protocol.OpExecTTYStart:
-		var payload protocol.ExecTTYStartPayload
-		if err := protocol.DecodePayload(req, &payload); err != nil {
+	case OpExecTTYStart:
+		var payload ExecTTYStartPayload
+		if err := DecodePayload(req, &payload); err != nil {
 			return containerMessage{}, err
 		}
 		startReq := containerExecTTYStartRequest{}
@@ -558,9 +556,9 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 		}
 		copy(msg.Payload[:], encoded)
 		msg.Header.PayloadLen = uint32(containerExecTTYStartRequestSize)
-	case protocol.OpExecTTYResize:
-		var payload protocol.ExecTTYResizePayload
-		if err := protocol.DecodePayload(req, &payload); err != nil {
+	case OpExecTTYResize:
+		var payload ExecTTYResizePayload
+		if err := DecodePayload(req, &payload); err != nil {
 			return containerMessage{}, err
 		}
 		resizeReq := containerExecTTYResizeRequest{
@@ -579,9 +577,9 @@ func encodeRequestMessage(req protocol.Envelope) (containerMessage, error) {
 		}
 		copy(msg.Payload[:], encoded)
 		msg.Header.PayloadLen = uint32(containerExecTTYResizeRequestSize)
-	case protocol.OpExecTTYClose:
-		var payload protocol.ExecTTYClosePayload
-		if err := protocol.DecodePayload(req, &payload); err != nil {
+	case OpExecTTYClose:
+		var payload ExecTTYClosePayload
+		if err := DecodePayload(req, &payload); err != nil {
 			return containerMessage{}, err
 		}
 		closeReq := containerExecTTYCloseRequest{}
@@ -615,25 +613,25 @@ func flattenArgv(command []string, args []string) []string {
 	return argv
 }
 
-func decodeResponseEnvelope(req protocol.Envelope, call containerCall) (protocol.Envelope, error) {
+func decodeResponseEnvelope(req Envelope, call containerCall) (Envelope, error) {
 	resp := call.Response
 	if resp.Header.Magic != mkringContainerMagic {
-		return protocol.Envelope{}, fmt.Errorf("unexpected response magic 0x%x", resp.Header.Magic)
+		return Envelope{}, fmt.Errorf("unexpected response magic 0x%x", resp.Header.Magic)
 	}
 	if resp.Header.Version != mkringContainerVersion {
-		return protocol.Envelope{}, fmt.Errorf("unexpected response version %d", resp.Header.Version)
+		return Envelope{}, fmt.Errorf("unexpected response version %d", resp.Header.Version)
 	}
 	if resp.Header.Channel != mkringContainerChannel {
-		return protocol.Envelope{}, fmt.Errorf("unexpected response channel %d", resp.Header.Channel)
+		return Envelope{}, fmt.Errorf("unexpected response channel %d", resp.Header.Channel)
 	}
 	if resp.Header.Kind != mkringContainerKindResponse {
-		return protocol.Envelope{}, fmt.Errorf("unexpected response kind %d", resp.Header.Kind)
+		return Envelope{}, fmt.Errorf("unexpected response kind %d", resp.Header.Kind)
 	}
 	if resp.Header.Operation != call.Request.Header.Operation {
-		return protocol.Envelope{}, fmt.Errorf("unexpected response operation %d", resp.Header.Operation)
+		return Envelope{}, fmt.Errorf("unexpected response operation %d", resp.Header.Operation)
 	}
 	if resp.Header.PayloadLen > containerPayloadSize {
-		return protocol.Envelope{}, fmt.Errorf("response payload too large: %d", resp.Header.PayloadLen)
+		return Envelope{}, fmt.Errorf("response payload too large: %d", resp.Header.PayloadLen)
 	}
 
 	status := resp.Header.Status
@@ -645,41 +643,41 @@ func decodeResponseEnvelope(req protocol.Envelope, call containerCall) (protocol
 	}
 
 	switch req.Operation {
-	case protocol.OpCreateContainer:
+	case OpCreateContainer:
 		if resp.Header.PayloadLen != containerCreateResponseSize {
-			return protocol.Envelope{}, fmt.Errorf("unexpected create response payload length %d", resp.Header.PayloadLen)
+			return Envelope{}, fmt.Errorf("unexpected create response payload length %d", resp.Header.PayloadLen)
 		}
 		var payload containerCreateResponse
 		if err := decodeStruct(resp.Payload[:containerCreateResponseSize], &payload); err != nil {
-			return protocol.Envelope{}, err
+			return Envelope{}, err
 		}
-		return protocol.NewResponse(req, protocol.CreateContainerResult{
+		return NewResponse(req, CreateContainerResult{
 			ContainerID: cString(payload.ContainerID[:]),
 			ImageRef:    cString(payload.ImageRef[:]),
 		})
-	case protocol.OpStartContainer, protocol.OpRemoveContainer, protocol.OpExecTTYStart, protocol.OpExecTTYResize, protocol.OpExecTTYClose:
+	case OpStartContainer, OpRemoveContainer, OpExecTTYStart, OpExecTTYResize, OpExecTTYClose:
 		if resp.Header.PayloadLen != 0 {
-			return protocol.Envelope{}, fmt.Errorf("unexpected empty-response payload length %d", resp.Header.PayloadLen)
+			return Envelope{}, fmt.Errorf("unexpected empty-response payload length %d", resp.Header.PayloadLen)
 		}
-		return protocol.NewResponse(req, struct{}{})
-	case protocol.OpStopContainer:
+		return NewResponse(req, struct{}{})
+	case OpStopContainer:
 		if resp.Header.PayloadLen != containerStopResponseSize {
-			return protocol.Envelope{}, fmt.Errorf("unexpected stop response payload length %d", resp.Header.PayloadLen)
+			return Envelope{}, fmt.Errorf("unexpected stop response payload length %d", resp.Header.PayloadLen)
 		}
 		var payload containerStopResponse
 		if err := decodeStruct(resp.Payload[:containerStopResponseSize], &payload); err != nil {
-			return protocol.Envelope{}, err
+			return Envelope{}, err
 		}
-		return protocol.NewResponse(req, protocol.StopContainerResult{ExitCode: payload.ExitCode})
-	case protocol.OpStatusContainer:
+		return NewResponse(req, StopContainerResult{ExitCode: payload.ExitCode})
+	case OpStatusContainer:
 		if resp.Header.PayloadLen != containerStatusResponseSize {
-			return protocol.Envelope{}, fmt.Errorf("unexpected status response payload length %d", resp.Header.PayloadLen)
+			return Envelope{}, fmt.Errorf("unexpected status response payload length %d", resp.Header.PayloadLen)
 		}
 		var payload containerStatusResponse
 		if err := decodeStruct(resp.Payload[:containerStatusResponseSize], &payload); err != nil {
-			return protocol.Envelope{}, err
+			return Envelope{}, err
 		}
-		return protocol.NewResponse(req, protocol.ContainerStatusResult{
+		return NewResponse(req, ContainerStatusResult{
 			State:              uapiStateToProtocol(payload.State),
 			ExitCode:           payload.ExitCode,
 			PID:                payload.PID,
@@ -687,43 +685,43 @@ func decodeResponseEnvelope(req protocol.Envelope, call containerCall) (protocol
 			FinishedAtUnixNano: payload.FinishedAtUnixNano,
 			Message:            cString(payload.Message[:]),
 		})
-	case protocol.OpReadLog:
+	case OpReadLog:
 		if resp.Header.PayloadLen != containerReadLogResponseSize {
-			return protocol.Envelope{}, fmt.Errorf("unexpected read-log response payload length %d", resp.Header.PayloadLen)
+			return Envelope{}, fmt.Errorf("unexpected read-log response payload length %d", resp.Header.PayloadLen)
 		}
 		var payload containerReadLogResponse
 		if err := decodeStruct(resp.Payload[:containerReadLogResponseSize], &payload); err != nil {
-			return protocol.Envelope{}, err
+			return Envelope{}, err
 		}
 		if payload.DataLen > mkringContainerMaxLogChunk {
-			return protocol.Envelope{}, fmt.Errorf("read-log response data too large: %d", payload.DataLen)
+			return Envelope{}, fmt.Errorf("read-log response data too large: %d", payload.DataLen)
 		}
 		data := make([]byte, payload.DataLen)
 		copy(data, payload.Data[:payload.DataLen])
-		return protocol.NewResponse(req, protocol.ReadLogResult{
+		return NewResponse(req, ReadLogResult{
 			NextOffset: payload.NextOffset,
 			EOF:        payload.EOF != 0,
 			Data:       data,
 		})
-	case protocol.OpExecTTYPrepare:
+	case OpExecTTYPrepare:
 		if resp.Header.PayloadLen != containerExecTTYPrepareResponseSize {
-			return protocol.Envelope{}, fmt.Errorf("unexpected exec-tty-prepare response payload length %d", resp.Header.PayloadLen)
+			return Envelope{}, fmt.Errorf("unexpected exec-tty-prepare response payload length %d", resp.Header.PayloadLen)
 		}
 		var payload containerExecTTYPrepareResponse
 		if err := decodeStruct(resp.Payload[:containerExecTTYPrepareResponseSize], &payload); err != nil {
-			return protocol.Envelope{}, err
+			return Envelope{}, err
 		}
-		return protocol.NewResponse(req, protocol.ExecTTYPrepareResult{
+		return NewResponse(req, ExecTTYPrepareResult{
 			SessionID: cString(payload.SessionID[:]),
 		})
 	default:
-		return protocol.Envelope{}, fmt.Errorf("unsupported operation %q", req.Operation)
+		return Envelope{}, fmt.Errorf("unsupported operation %q", req.Operation)
 	}
 
-	return protocol.Envelope{}, fmt.Errorf("unsupported operation %q", req.Operation)
+	return Envelope{}, fmt.Errorf("unsupported operation %q", req.Operation)
 }
 
-func decodeErrorEnvelope(req protocol.Envelope, resp containerMessage, status int32) protocol.Envelope {
+func decodeErrorEnvelope(req Envelope, resp containerMessage, status int32) Envelope {
 	message := fmt.Sprintf("remote error: status=%d", status)
 	code := statusCodeString(status)
 
@@ -739,30 +737,30 @@ func decodeErrorEnvelope(req protocol.Envelope, resp containerMessage, status in
 		}
 	}
 
-	return protocol.NewErrorResponse(req, code, message)
+	return NewErrorResponse(req, code, message)
 }
 
-func operationToUAPI(op protocol.Operation) (uint8, error) {
+func operationToUAPI(op Operation) (uint8, error) {
 	switch op {
-	case protocol.OpCreateContainer:
+	case OpCreateContainer:
 		return mkringContainerOpCreate, nil
-	case protocol.OpStartContainer:
+	case OpStartContainer:
 		return mkringContainerOpStart, nil
-	case protocol.OpStopContainer:
+	case OpStopContainer:
 		return mkringContainerOpStop, nil
-	case protocol.OpRemoveContainer:
+	case OpRemoveContainer:
 		return mkringContainerOpRemove, nil
-	case protocol.OpStatusContainer:
+	case OpStatusContainer:
 		return mkringContainerOpStatus, nil
-	case protocol.OpReadLog:
+	case OpReadLog:
 		return mkringContainerOpReadLog, nil
-	case protocol.OpExecTTYPrepare:
+	case OpExecTTYPrepare:
 		return mkringContainerOpExecTTYPrepare, nil
-	case protocol.OpExecTTYStart:
+	case OpExecTTYStart:
 		return mkringContainerOpExecTTYStart, nil
-	case protocol.OpExecTTYResize:
+	case OpExecTTYResize:
 		return mkringContainerOpExecTTYResize, nil
-	case protocol.OpExecTTYClose:
+	case OpExecTTYClose:
 		return mkringContainerOpExecTTYClose, nil
 	default:
 		return 0, fmt.Errorf("unsupported operation %q", op)
@@ -776,16 +774,16 @@ func boolToU8(v bool) uint8 {
 	return 0
 }
 
-func uapiStateToProtocol(state uint32) protocol.ContainerStatusState {
+func uapiStateToProtocol(state uint32) ContainerStatusState {
 	switch state {
 	case 1:
-		return protocol.ContainerStatusCreated
+		return ContainerStatusCreated
 	case 2:
-		return protocol.ContainerStatusRunning
+		return ContainerStatusRunning
 	case 3:
-		return protocol.ContainerStatusExited
+		return ContainerStatusExited
 	default:
-		return protocol.ContainerStatusUnknown
+		return ContainerStatusUnknown
 	}
 }
 

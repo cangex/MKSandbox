@@ -12,7 +12,7 @@ It keeps the original layered design while using a conventional C project layout
 ## Request Handling Flow
 
 ```text
-host mkring-bridge
+host direct mkring control transport
   -> guest-side mkring bridge
   -> mkga_transport_receive()
   -> mkga_agent_handle()

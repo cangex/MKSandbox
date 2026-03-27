@@ -31,7 +31,7 @@ The current control chain is:
 ```text
 crictl
   -> mkcri
-  -> mkring-bridge
+  -> direct mkring control transport
   -> /dev/mkring_container_bridge (host)
   -> mkring
   -> /dev/mkring_container_bridge (guest)
@@ -57,7 +57,6 @@ Exec RPC
 Top-level directories:
 
 - `mk-container`
-- `mkring-bridge`
 - `mk-guest-agent`
 - `mkring`
 - `scripts`
@@ -77,7 +76,7 @@ Main responsibilities:
 - expose the CRI gRPC API,
 - manage the `PodSandbox -> sub-kernel` mapping,
 - manage `container -> guest runtime` lifecycle operations,
-- call `mkring-bridge` to forward control requests into the guest,
+- issue `mkring` control calls directly from the host runtime path,
 - maintain host-side pod/container state,
 - synchronize guest state and logs back to the host,
 - host the CRI-facing TTY exec streaming endpoint, including the current SPDY front-end used by `crictl exec -it`.
@@ -89,7 +88,7 @@ Main subdirectories:
 - `pkg/cri`: CRI handlers
 - `pkg/runtime`: pod/container lifecycle orchestration
 - `pkg/kernel`: sub-kernel start/stop abstraction
-- `pkg/agent`: host-side client that talks to `mkring-bridge`
+- `pkg/agent`: host-side per-kernel runtime clients, including the direct `mkring` path
 - `pkg/streaming`: host-side TTY exec streaming server and device data plane
 - `docs`: architecture and integration documents
 
@@ -113,49 +112,7 @@ cd mk-container
 go test ./pkg/agent ./pkg/runtime ./pkg/streaming
 ```
 
-### 3.2 `mkring-bridge`
-
-#### Responsibility
-
-`mkring-bridge` is the host-side user-space control bridge. It converts `mkcri` requests into calls on `/dev/mkring_container_bridge`, then forwards them through `mkring` into the guest.
-
-Main responsibilities:
-
-- provide a local Unix socket / HTTP API,
-- encode container control requests as `mkring` container messages,
-- call the host kernel bridge `WAIT_READY` / `CALL` interfaces,
-- receive guest responses and return them to `mkcri`,
-- provide synchronous queries such as `status` and `read-log`.
-
-Current main APIs:
-
-- `POST /v1/kernels/{peerID}/wait-ready`
-- `POST /v1/kernels/{peerID}/containers`
-- `POST /v1/kernels/{peerID}/containers/{containerID}/start`
-- `POST /v1/kernels/{peerID}/containers/{containerID}/stop`
-- `POST /v1/kernels/{peerID}/containers/{containerID}/remove`
-- `POST /v1/kernels/{peerID}/containers/{containerID}/status`
-- `POST /v1/kernels/{peerID}/containers/{containerID}/read-log`
-- `POST /v1/kernels/{peerID}/containers/{containerID}/exec-tty-prepare`
-- `POST /v1/kernels/{peerID}/sessions/{sessionID}/start`
-- `POST /v1/kernels/{peerID}/sessions/{sessionID}/resize`
-- `POST /v1/kernels/{peerID}/sessions/{sessionID}/close`
-
-#### Build
-
-```bash
-cd mkring-bridge
-go build -o mkring-bridge ./cmd/mkring-bridge
-```
-
-#### Test
-
-```bash
-cd mkring-bridge
-go test ./internal/...
-```
-
-### 3.3 `mk-guest-agent`
+### 3.2 `mk-guest-agent`
 
 #### Responsibility
 
@@ -203,7 +160,7 @@ cd mk-guest-agent
 make test
 ```
 
-### 3.4 `mkring`
+### 3.3 `mkring`
 
 #### Responsibility
 
@@ -281,7 +238,6 @@ Main scripts:
 
 - `start-host.sh`
   - starts the host control plane,
-  - starts `mkring-bridge`,
   - starts `mkcri`,
   - ensures `/dev/mkring_container_bridge` and `/dev/mkring_stream_bridge` exist.
 - `init`
@@ -412,5 +368,5 @@ When deploying, keep these pieces aligned:
 
 - host and guest copies of `mkring_container_bridge.ko`,
 - host and guest copies of `mkring_stream_bridge.ko`,
-- `mkring-bridge`, `mkcri`, and `mk-guest-agent` matching the current protocol version,
+- `mkcri` and `mk-guest-agent` matching the current protocol version,
 - guest initrd repacked with the updated guest agent and kernel modules.

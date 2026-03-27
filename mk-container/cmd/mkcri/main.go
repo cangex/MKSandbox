@@ -79,7 +79,7 @@ func main() {
 	case "mock":
 		agentFactory = agent.NewMockFactory()
 	case "mkring":
-		agentFactory = agent.NewMkringBridgeFactory(cfg.MKringBridgeSocket)
+		agentFactory = agent.NewMkringFactory(cfg.ControlDevicePath)
 	default:
 		log.Fatalf("unsupported control transport: %s", cfg.ControlTransport)
 	}
@@ -106,6 +106,7 @@ func main() {
 	}
 
 	log.Printf("mkcri started, endpoint=unix://%s runtime=%s", socketPath, service.String())
+	log.Printf("mkcri control transport=%s control_device=%s", cfg.ControlTransport, cfg.ControlDevicePath)
 	log.Printf("mkcri exec streaming started, address=%s base_url=%s device=%s", cfg.StreamListenAddress, cfg.StreamBaseURL, cfg.StreamDevicePath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

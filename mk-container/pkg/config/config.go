@@ -10,12 +10,12 @@ type Config struct {
 	ListenSocket           string
 	StreamListenAddress    string
 	StreamBaseURL          string
+	ControlDevicePath      string
 	StreamDevicePath       string
 	KernelStartCommand     string
 	KernelStopCommand      string
 	KernelEndpointTemplate string
 	ControlTransport       string
-	MKringBridgeSocket     string
 	KernelPeerIDBase       int
 	KernelPeerIDMax        int
 	PodCIDRBase            string
@@ -58,12 +58,12 @@ func FromEnv() Config {
 		ListenSocket:           fromEnvOrDefault("MKCRI_LISTEN_SOCKET", "/tmp/mkcri.sock"),
 		StreamListenAddress:    fromEnvOrDefault("MKCRI_STREAM_LISTEN_ADDRESS", "127.0.0.1:10010"),
 		StreamBaseURL:          fromEnvOrDefault("MKCRI_STREAM_BASE_URL", "http://127.0.0.1:10010"),
+		ControlDevicePath:      fromEnvOrDefault("MKCRI_CONTROL_DEVICE_PATH", "/dev/mkring_container_bridge"),
 		StreamDevicePath:       fromEnvOrDefault("MKCRI_STREAM_DEVICE_PATH", "/dev/mkring_stream_bridge"),
 		KernelStartCommand:     os.Getenv("MK_KERNEL_START_COMMAND"),
 		KernelStopCommand:      os.Getenv("MK_KERNEL_STOP_COMMAND"),
 		KernelEndpointTemplate: fromEnvOrDefault("MK_KERNEL_ENDPOINT_TEMPLATE", "unix:///run/mk-kernel/%s/containerd.sock"),
-		ControlTransport:       fromEnvOrDefault("MK_CONTROL_TRANSPORT", "mock"),
-		MKringBridgeSocket:     fromEnvOrDefault("MK_MKRING_BRIDGE_SOCKET", "/run/mk-container/mkring-bridge.sock"),
+		ControlTransport:       fromEnvOrDefault("MK_CONTROL_TRANSPORT", "mkring"),
 		KernelPeerIDBase:       kernelPeerIDBase,
 		KernelPeerIDMax:        kernelPeerIDMax,
 		PodCIDRBase:            fromEnvOrDefault("MK_POD_CIDR_BASE", "10.240.0.0"),

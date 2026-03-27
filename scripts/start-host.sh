@@ -6,29 +6,30 @@ RUN_DIR="${HOST_RUN_DIR:-$ROOT_DIR/.host-run}"
 LOG_DIR="${HOST_LOG_DIR:-$RUN_DIR/logs}"
 PID_DIR="${HOST_PID_DIR:-$RUN_DIR/pids}"
 
-MKRING_BRIDGE_BIN="${MKRING_BRIDGE_BIN:-$ROOT_DIR/mkring-bridge/mkring-bridge}"
 MKCRI_BIN="${MKCRI_BIN:-$ROOT_DIR/mk-container/mkcri}"
 
-MKRING_BRIDGE_TRANSPORT="${MKRING_BRIDGE_TRANSPORT:-device}"
-MKRING_BRIDGE_DEVICE_PATH="${MKRING_BRIDGE_DEVICE_PATH:-/dev/mkring_container_bridge}"
-MKRING_STREAM_DEVICE_PATH="${MKRING_STREAM_DEVICE_PATH:-/dev/mkring_stream_bridge}"
-MKRING_BRIDGE_LISTEN_SOCKET="${MKRING_BRIDGE_LISTEN_SOCKET:-/run/mk-container/mkring-bridge.sock}"
-
+MKCRI_CONTROL_DEVICE_PATH="${MKCRI_CONTROL_DEVICE_PATH:-/dev/mkring_container_bridge}"
+MKCRI_STREAM_DEVICE_PATH="${MKCRI_STREAM_DEVICE_PATH:-/dev/mkring_stream_bridge}"
 MKCRI_LISTEN_SOCKET="${MKCRI_LISTEN_SOCKET:-/tmp/mkcri.sock}"
-MKCRI_STREAM_DEVICE_PATH="${MKCRI_STREAM_DEVICE_PATH:-$MKRING_STREAM_DEVICE_PATH}"
 MK_CONTROL_TRANSPORT="${MK_CONTROL_TRANSPORT:-mkring}"
-MK_MKRING_BRIDGE_SOCKET="${MK_MKRING_BRIDGE_SOCKET:-$MKRING_BRIDGE_LISTEN_SOCKET}"
 MK_KERNEL_START_COMMAND="${MK_KERNEL_START_COMMAND:-/usr/local/bin/start-subkernel}"
 MK_KERNEL_STOP_COMMAND="${MK_KERNEL_STOP_COMMAND:-/usr/local/bin/stop-subkernel}"
 
-BRIDGE_PID_FILE="$PID_DIR/mkring-bridge.pid"
 MKCRI_PID_FILE="$PID_DIR/mkcri.pid"
-BRIDGE_LOG_FILE="$LOG_DIR/mkring-bridge.log"
 MKCRI_LOG_FILE="$LOG_DIR/mkcri.log"
 
 die() {
 	echo "start-host.sh: $*" >&2
 	exit 1
+}
+
+validate_control_transport() {
+	case "$MK_CONTROL_TRANSPORT" in
+		mock|mkring) ;;
+		*)
+			die "unsupported MK_CONTROL_TRANSPORT: $MK_CONTROL_TRANSPORT"
+			;;
+	esac
 }
 
 pid_matches_process() {
@@ -103,23 +104,21 @@ wait_for_unix_socket() {
 
 ensure_root() {
 	if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-		die "please run as root (needed for /run and kernel module setup)"
+		die "please run as root (needed for socket and kernel module setup)"
 	fi
 }
 
 ensure_dirs() {
 	mkdir -p "$RUN_DIR" "$LOG_DIR" "$PID_DIR"
-	mkdir -p "$(dirname "$MKRING_BRIDGE_LISTEN_SOCKET")"
 	mkdir -p "$(dirname "$MKCRI_LISTEN_SOCKET")"
 }
 
 ensure_not_running() {
-	check_pid_file "$BRIDGE_PID_FILE" "mkring-bridge"
 	check_pid_file "$MKCRI_PID_FILE" "mkcri"
 }
 
 ensure_kernel_commands() {
-	[[ "$MK_CONTROL_TRANSPORT" == "mkring" ]] || return 0
+	[[ "$MK_CONTROL_TRANSPORT" == "mock" ]] && return 0
 	require_file "$MK_KERNEL_START_COMMAND"
 	require_file "$MK_KERNEL_STOP_COMMAND"
 }
@@ -128,45 +127,27 @@ ensure_module_device() {
 	local dev_name
 	local stream_dev_name
 
-	[[ "$MKRING_BRIDGE_TRANSPORT" == "device" ]] || return 0
-	if [[ -e "$MKRING_BRIDGE_DEVICE_PATH" ]]; then
+	[[ "$MK_CONTROL_TRANSPORT" == "mock" ]] && return 0
+
+	if [[ -e "$MKCRI_CONTROL_DEVICE_PATH" ]]; then
 		:
 	else
-		dev_name="$(basename "$MKRING_BRIDGE_DEVICE_PATH")"
+		dev_name="$(basename "$MKCRI_CONTROL_DEVICE_PATH")"
 		modprobe mkring_container_bridge role=host "device_name=$dev_name"
 
-		wait_for_path "$MKRING_BRIDGE_DEVICE_PATH" 5 || \
-			die "device not ready after modprobe: $MKRING_BRIDGE_DEVICE_PATH"
+		wait_for_path "$MKCRI_CONTROL_DEVICE_PATH" 5 || \
+			die "device not ready after modprobe: $MKCRI_CONTROL_DEVICE_PATH"
 	fi
 
-	if [[ -e "$MKRING_STREAM_DEVICE_PATH" ]]; then
+	if [[ -e "$MKCRI_STREAM_DEVICE_PATH" ]]; then
 		return 0
 	fi
 
-	stream_dev_name="$(basename "$MKRING_STREAM_DEVICE_PATH")"
+	stream_dev_name="$(basename "$MKCRI_STREAM_DEVICE_PATH")"
 	modprobe mkring_stream_bridge "device_name=$stream_dev_name"
 
-	wait_for_path "$MKRING_STREAM_DEVICE_PATH" 5 || \
-		die "device not ready after modprobe: $MKRING_STREAM_DEVICE_PATH"
-}
-
-start_bridge() {
-	rm -f "$MKRING_BRIDGE_LISTEN_SOCKET"
-
-	nohup env \
-		MKRING_BRIDGE_TRANSPORT="$MKRING_BRIDGE_TRANSPORT" \
-		MKRING_BRIDGE_DEVICE_PATH="$MKRING_BRIDGE_DEVICE_PATH" \
-		MKRING_BRIDGE_LISTEN_SOCKET="$MKRING_BRIDGE_LISTEN_SOCKET" \
-		"$MKRING_BRIDGE_BIN" \
-		>>"$BRIDGE_LOG_FILE" 2>&1 &
-
-	echo $! >"$BRIDGE_PID_FILE"
-
-	wait_for_unix_socket "$MKRING_BRIDGE_LISTEN_SOCKET" 5 || {
-		kill "$(cat "$BRIDGE_PID_FILE")" 2>/dev/null || true
-		rm -f "$BRIDGE_PID_FILE"
-		die "mkring-bridge did not create socket: $MKRING_BRIDGE_LISTEN_SOCKET"
-	}
+	wait_for_path "$MKCRI_STREAM_DEVICE_PATH" 5 || \
+		die "device not ready after modprobe: $MKCRI_STREAM_DEVICE_PATH"
 }
 
 start_mkcri() {
@@ -174,7 +155,7 @@ start_mkcri() {
 
 	nohup env \
 		MK_CONTROL_TRANSPORT="$MK_CONTROL_TRANSPORT" \
-		MK_MKRING_BRIDGE_SOCKET="$MK_MKRING_BRIDGE_SOCKET" \
+		MKCRI_CONTROL_DEVICE_PATH="$MKCRI_CONTROL_DEVICE_PATH" \
 		MKCRI_LISTEN_SOCKET="$MKCRI_LISTEN_SOCKET" \
 		MKCRI_STREAM_DEVICE_PATH="$MKCRI_STREAM_DEVICE_PATH" \
 		MK_KERNEL_START_COMMAND="$MK_KERNEL_START_COMMAND" \
@@ -187,8 +168,6 @@ start_mkcri() {
 	wait_for_unix_socket "$MKCRI_LISTEN_SOCKET" 5 || {
 		kill "$(cat "$MKCRI_PID_FILE")" 2>/dev/null || true
 		rm -f "$MKCRI_PID_FILE"
-		kill "$(cat "$BRIDGE_PID_FILE")" 2>/dev/null || true
-		rm -f "$BRIDGE_PID_FILE"
 		die "mkcri did not create socket: $MKCRI_LISTEN_SOCKET"
 	}
 }
@@ -197,22 +176,14 @@ print_summary() {
 	cat <<EOF
 host services started
 
-mkring-bridge:
-  pid file: $BRIDGE_PID_FILE
-  log file: $BRIDGE_LOG_FILE
-  socket:   $MKRING_BRIDGE_LISTEN_SOCKET
-
 mkcri:
   pid file: $MKCRI_PID_FILE
   log file: $MKCRI_LOG_FILE
   socket:   $MKCRI_LISTEN_SOCKET
 
 effective config:
-  MKRING_BRIDGE_TRANSPORT=$MKRING_BRIDGE_TRANSPORT
-  MKRING_BRIDGE_DEVICE_PATH=$MKRING_BRIDGE_DEVICE_PATH
-  MKRING_STREAM_DEVICE_PATH=$MKRING_STREAM_DEVICE_PATH
   MK_CONTROL_TRANSPORT=$MK_CONTROL_TRANSPORT
-  MK_MKRING_BRIDGE_SOCKET=$MK_MKRING_BRIDGE_SOCKET
+  MKCRI_CONTROL_DEVICE_PATH=$MKCRI_CONTROL_DEVICE_PATH
   MKCRI_STREAM_DEVICE_PATH=$MKCRI_STREAM_DEVICE_PATH
   MK_KERNEL_START_COMMAND=$MK_KERNEL_START_COMMAND
   MK_KERNEL_STOP_COMMAND=$MK_KERNEL_STOP_COMMAND
@@ -221,13 +192,12 @@ EOF
 
 main() {
 	ensure_root
-	require_file "$MKRING_BRIDGE_BIN"
+	validate_control_transport
 	require_file "$MKCRI_BIN"
 	ensure_kernel_commands
 	ensure_dirs
 	ensure_not_running
 	ensure_module_device
-	start_bridge
 	start_mkcri
 	print_summary
 }

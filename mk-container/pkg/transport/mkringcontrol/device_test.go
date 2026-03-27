@@ -1,12 +1,10 @@
-package transport
+package mkringcontrol
 
 import (
 	"context"
 	"testing"
 	"time"
 	"unsafe"
-
-	"mkring-bridge/internal/protocol"
 )
 
 type fakeDeviceFile struct {
@@ -214,7 +212,7 @@ func TestDeviceTransportRoundTripCreate(t *testing.T) {
 		return nil
 	}
 
-	req, err := protocol.NewRequest("req-1", 9, "kernel-a", protocol.OpCreateContainer, protocol.CreateContainerPayload{
+	req, err := NewRequest("req-1", 9, "kernel-a", OpCreateContainer, CreateContainerPayload{
 		KernelID: "kernel-a",
 		PodID:    "pod-a",
 		Name:     "ctr-a",
@@ -238,8 +236,8 @@ func TestDeviceTransportRoundTripCreate(t *testing.T) {
 		t.Fatalf("unexpected response id: got=%s want=%s", resp.ID, req.ID)
 	}
 
-	var result protocol.CreateContainerResult
-	if err := protocol.DecodePayload(resp, &result); err != nil {
+	var result CreateContainerResult
+	if err := DecodePayload(resp, &result); err != nil {
 		t.Fatalf("decode response payload: %v", err)
 	}
 	if result.ContainerID != "container-123" {
@@ -338,7 +336,7 @@ func TestDeviceTransportRoundTripExecTTYPrepare(t *testing.T) {
 		return nil
 	}
 
-	req, err := protocol.NewRequest("req-exec-1", 9, "kernel-a", protocol.OpExecTTYPrepare, protocol.ExecTTYPreparePayload{
+	req, err := NewRequest("req-exec-1", 9, "kernel-a", OpExecTTYPrepare, ExecTTYPreparePayload{
 		KernelID:    "kernel-a",
 		ContainerID: "ctr-a",
 		Command:     []string{"sh", "-l"},
@@ -359,8 +357,8 @@ func TestDeviceTransportRoundTripExecTTYPrepare(t *testing.T) {
 		t.Fatalf("unexpected response error: %+v", resp.Error)
 	}
 
-	var result protocol.ExecTTYPrepareResult
-	if err := protocol.DecodePayload(resp, &result); err != nil {
+	var result ExecTTYPrepareResult
+	if err := DecodePayload(resp, &result); err != nil {
 		t.Fatalf("decode response payload: %v", err)
 	}
 	if result.SessionID != "exec-session-1" {
@@ -430,7 +428,7 @@ func TestDeviceTransportRoundTripExecTTYStart(t *testing.T) {
 		return nil
 	}
 
-	req, err := protocol.NewRequest("req-exec-start-1", 9, "kernel-a", protocol.OpExecTTYStart, protocol.ExecTTYStartPayload{
+	req, err := NewRequest("req-exec-start-1", 9, "kernel-a", OpExecTTYStart, ExecTTYStartPayload{
 		KernelID:  "kernel-a",
 		SessionID: "exec-session-1",
 	})

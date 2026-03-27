@@ -7,24 +7,24 @@ sub-kernel rootfs.
 
 The control chain is:
 
-`mkcri -> host mkring-bridge -> host kernel mkring -> sub-kernel guest agent -> containerd`
+`mkcri -> direct mkring control transport -> host kernel mkring -> sub-kernel guest agent -> containerd`
 
-## Why a bridge is required
+## Why a direct host control path is used
 
 `mkring` only exposes in-kernel APIs today. `mkcri` is a user-space Go process,
 so it cannot call `mkring_send()` / `mkring_recv()` directly. The current tree
-now has a kernel bridge module `mkring_container_bridge.c`, and the remaining
-host-side bridge process should sit on top of its miscdevice. The complete path
-becomes:
+uses the kernel bridge module `mkring_container_bridge.c`, and `mkcri` now
+talks to that device directly through its in-process control transport. The
+complete path becomes:
 
-`mkcri -> host mkring-bridge -> /dev/mkring_container_bridge -> mkring -> sub-kernel /dev/mkring_container_bridge -> mk-guest-agent -> containerd`
+`mkcri -> /dev/mkring_container_bridge -> mkring -> sub-kernel /dev/mkring_container_bridge -> mk-guest-agent -> containerd`
 
-The host-side bridge process is still required to:
+The host runtime still needs to:
 
-- accept user-space requests from `mkcri`,
+- accept CRI/runtime requests from `mkcri`,
 - hand them to the host kernel's mkring bridge,
 - forward them to the target sub-kernel,
-- collect the response and return it to `mkcri`.
+- collect the response and return it to the runtime engine.
 
 ## Addressing model
 
@@ -45,26 +45,12 @@ When `MK_CONTROL_TRANSPORT=mkring`, `kernel.Manager` returns endpoints like:
 
 `mkring://7?kernel_id=<opaque-kernel-id>`
 
-`pkg/agent` parses the peer-kernel-id (`7`) and sends runtime operations to the
-host-side bridge.
+`pkg/agent` parses the peer-kernel-id (`7`) and sends runtime operations over
+the host `mkring` control transport.
 
-## Host-side bridge API expected by mkcri
+## Host-side control API expected by mkcri
 
-The Go client expects a local HTTP API exposed by the host-side bridge. The
-bridge itself may listen on a Unix socket such as
-`/run/mk-container/mkring-bridge.sock`.
-
-Expected operations:
-
-- `POST /v1/kernels/{peerID}/containers`
-- `POST /v1/kernels/{peerID}/containers/{containerID}/start`
-- `POST /v1/kernels/{peerID}/containers/{containerID}/stop`
-- `POST /v1/kernels/{peerID}/containers/{containerID}/remove`
-
-Request payloads always include `kernel_id` so the bridge can validate routing
-and correlate logs with mkcri state.
-
-Under the HTTP layer, the intended host implementation is:
+The host-side transport should provide the same logical operations:
 
 - issue `MKRING_CONTAINER_IOC_WAIT_READY` before the first request to a peer
 - issue `MKRING_CONTAINER_IOC_CALL` for each container operation

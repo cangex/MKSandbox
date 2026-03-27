@@ -9,7 +9,7 @@ MKCRI_LISTEN_SOCKET=/var/run/mkcri.sock \
 MK_KERNEL_START_COMMAND="/usr/local/bin/mk-kernelctl start" \
 MK_KERNEL_STOP_COMMAND="/usr/local/bin/mk-kernelctl stop" \
 MK_CONTROL_TRANSPORT=mkring \
-MK_MKRING_BRIDGE_SOCKET=/run/mk-container/mkring-bridge.sock \
+MKCRI_CONTROL_DEVICE_PATH=/dev/mkring_container_bridge \
 go run ./cmd/mkcri
 ```
 
@@ -52,9 +52,9 @@ mkcri reports pod IP and runtime/network ready status. Real networking should be
 ## 5) Provide host bridge + guest agent
 
 Current `pkg/agent/mock_client.go` is for bring-up.
-The `mkring` control transport expects:
+The default `mkring` control transport expects:
 
-- a host-side bridge process on `MK_MKRING_BRIDGE_SOCKET`,
+- a host control device at `MKCRI_CONTROL_DEVICE_PATH`,
 - a guest-side agent inside each sub-kernel,
 - guest-agent -> containerd integration,
 - request/response forwarding over `mkring`.

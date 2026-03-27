@@ -75,7 +75,8 @@ func (m *ProcessManager) runKernelCommand(ctx context.Context, command, kernelID
 }
 
 func (m *ProcessManager) kernelEndpoint(kernelID string, peerKernelID uint16) string {
-	if strings.EqualFold(m.controlTransport, "mkring") {
+	switch strings.ToLower(strings.TrimSpace(m.controlTransport)) {
+	case "mkring":
 		return fmt.Sprintf("mkring://%d?kernel_id=%s", peerKernelID, kernelID)
 	}
 	return fmt.Sprintf(m.endpointTemplate, kernelID)
