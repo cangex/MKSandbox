@@ -12,8 +12,8 @@ MKCRI_CONTROL_DEVICE_PATH="${MKCRI_CONTROL_DEVICE_PATH:-/dev/mkring_container_br
 MKCRI_STREAM_DEVICE_PATH="${MKCRI_STREAM_DEVICE_PATH:-/dev/mkring_stream_bridge}"
 MKCRI_LISTEN_SOCKET="${MKCRI_LISTEN_SOCKET:-/tmp/mkcri.sock}"
 MK_CONTROL_TRANSPORT="${MK_CONTROL_TRANSPORT:-mkring}"
-MK_KERNEL_START_COMMAND="${MK_KERNEL_START_COMMAND:-/usr/local/bin/start-subkernel}"
-MK_KERNEL_STOP_COMMAND="${MK_KERNEL_STOP_COMMAND:-/usr/local/bin/stop-subkernel}"
+MK_KERNEL_START_COMMAND="${MK_KERNEL_START_COMMAND:-/home/wzx/multikernel.sh}"
+MK_KERNEL_STOP_COMMAND="${MK_KERNEL_STOP_COMMAND:-/home/wzx/stub_stop.sh}"
 
 MKCRI_PID_FILE="$PID_DIR/mkcri.pid"
 MKCRI_LOG_FILE="$LOG_DIR/mkcri.log"
@@ -150,6 +150,14 @@ ensure_module_device() {
 		die "device not ready after modprobe: $MKCRI_STREAM_DEVICE_PATH"
 }
 
+ensure_daxfs_started() {
+	insmod "/home/wzx/daxfs/daxfs/daxfs/daxfs.ko" || true
+	"/home/wzx/daxfs/daxfs/tools/mkdaxfs" -d "/home/wzx/daxfs/daxfs-share" -D /dev/mem -p 0x250000000 -s 256M
+	mkdir -p /mnt/daxfs || true
+	mount -t daxfs -o phys=0x250000000,size=268435456 none /mnt/daxfs
+	echo "daxfs mount on /mnt/daxfs"
+}
+
 start_mkcri() {
 	rm -f "$MKCRI_LISTEN_SOCKET"
 
@@ -198,6 +206,7 @@ main() {
 	ensure_dirs
 	ensure_not_running
 	ensure_module_device
+	ensure_daxfs_started
 	start_mkcri
 	print_summary
 }

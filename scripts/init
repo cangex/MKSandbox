@@ -124,6 +124,25 @@ ensure_overlay_ready() {
 		fatal "overlay filesystem is not available"
 }
 
+ensure_daxfs_ready() {
+	bb mkdir -p "$DAXFS_MOUNT_POINT"
+
+	if bb grep -q " $DAXFS_MOUNT_POINT " /proc/mounts 2>/dev/null; then
+		return 0
+	fi
+
+	if ! bb grep -q '^daxfs$' /proc/filesystems 2>/dev/null; then
+		if [ -n "$DAXFS_MODULE" ] && [ -f "$DAXFS_MODULE" ]; then
+			bb insmod "$DAXFS_MODULE" 2>/tmp/daxfs.insmod.log || true
+		fi
+		sleep 0.2
+	fi
+
+	bb mount -t daxfs -o "phys=$DAXFS_PHYS,size=$DAXFS_SIZE" none "$DAXFS_MOUNT_POINT" \
+		2>/tmp/daxfs.mount.log || \
+		echo "guest init: mount daxfs failed; check /tmp/daxfs.mount.log" >&2
+}
+
 ensure_guest_bridge_device() {
 	if [ -e "$BRIDGE_DEVICE" ]; then
 		return 0
@@ -131,12 +150,12 @@ ensure_guest_bridge_device() {
 
 	if command -v modprobe >/dev/null 2>&1; then
 		modprobe mkring_container_bridge role=guest "device_name=$BRIDGE_DEVICE_NAME" \
-			2>/tmp/mkring-container.modprobe.log || true
+			2>/tmp/mkring-bridge.modprobe.log || true
 	fi
 
 	if [ ! -e "$BRIDGE_DEVICE" ] && [ -f "$BRIDGE_MODULE" ]; then
 		bb insmod "$BRIDGE_MODULE" role=guest "device_name=$BRIDGE_DEVICE_NAME" \
-			2>/tmp/mkring-container.insmod.log || true
+			2>/tmp/mkring-bridge.insmod.log || true
 	fi
 
 	wait_for_path "$BRIDGE_DEVICE" 10 || fatal "guest bridge device not ready: $BRIDGE_DEVICE"
@@ -191,9 +210,13 @@ start_containerd() {
 }
 
 import_images_if_present() {
-	[ -d "$IMAGE_DIR" ] || return 0
+	import_dir="$IMAGE_DIR"
+	[ -d "/daxfs/images" ] && import_dir="/daxfs/images"
+	[ -d "$import_dir" ] || return 0
+	echo "importing container images from: $import_dir" \
+		>>"$CONTAINERD_LOG" 2>&1
 
-	for image_tar in "$IMAGE_DIR"/*; do
+	for image_tar in "$import_dir"/*; do
 		[ -f "$image_tar" ] || continue
 
 		"$CTR_BIN" --address "$CONTAINERD_SOCKET" --namespace "$CONTAINERD_NAMESPACE" \
@@ -238,6 +261,9 @@ peer kernel id: $PEER_KERNEL_ID
 namespace: $CONTAINERD_NAMESPACE
 containerd config: ${CONTAINERD_CONFIG:-<default>}
 image dir: ${IMAGE_DIR:-<none>}
+daxfs mount point: ${DAXFS_MOUNT_POINT}
+daxfs module: ${DAXFS_MODULE:-<none>}
+daxfs options: phys=${DAXFS_PHYS},size=${DAXFS_SIZE}
 EOF
 }
 
@@ -256,6 +282,10 @@ CONTAINERD_NAMESPACE="$(cmdline_get mkga.namespace || echo mk)"
 CONTAINERD_CONFIG="$(cmdline_get mkga.containerd_config || true)"
 IMAGE_DIR="$(cmdline_get mkga.image_dir || echo /images)"
 OVERLAY_MODULE="$(cmdline_get mkga.overlay_module || true)"
+DAXFS_MOUNT_POINT="$(cmdline_get mkga.daxfs_mountpoint || echo /daxfs)"
+DAXFS_MODULE="$(cmdline_get mkga.daxfs_module || true)"
+DAXFS_PHYS="$(cmdline_get mkga.daxfs_phys || echo 0x250000000)"
+DAXFS_SIZE="$(cmdline_get mkga.daxfs_size || echo 268435456)"
 CONTAINERD_LOG=/tmp/containerd.log
 AGENT_LOG=/tmp/mk-guest-agent.log
 
@@ -294,11 +324,17 @@ OVERLAY_MODULE="$(find_existing_path \
 	"/overlay.ko" \
 	"/lib/modules/overlay.ko" \
 	"/modules/overlay.ko" || true)"
+DAXFS_MODULE="$(find_existing_path \
+	"$DAXFS_MODULE" \
+	"/daxfs.ko" \
+	"/lib/modules/daxfs.ko" \
+	"/modules/daxfs.ko" || true)"
 
 mount_core_fs
 ensure_basic_dev_nodes
 prepare_runtime_links
 ensure_overlay_ready
+ensure_daxfs_ready
 ensure_guest_bridge_device
 ensure_guest_stream_device
 start_containerd
