@@ -15,7 +15,7 @@
 #endif
 
 /*
- * Phase 2 direct-entry transport backend.
+ * Direct-entry transport backend.
  *
  * This backend keeps the existing mkga_transport_ops shape so the guest agent
  * above the transport layer can remain unchanged. The kernel syscall only

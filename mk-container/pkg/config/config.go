@@ -11,7 +11,6 @@ type Config struct {
 	StreamListenAddress    string
 	StreamBaseURL          string
 	TransportSyscallNR     uintptr
-	StreamDevicePath       string
 	KernelStartCommand     string
 	KernelStopCommand      string
 	KernelEndpointTemplate string
@@ -67,7 +66,6 @@ func FromEnv() Config {
 		StreamListenAddress:    fromEnvOrDefault("MKCRI_STREAM_LISTEN_ADDRESS", "127.0.0.1:10010"),
 		StreamBaseURL:          fromEnvOrDefault("MKCRI_STREAM_BASE_URL", "http://127.0.0.1:10010"),
 		TransportSyscallNR:     transportSyscallNR,
-		StreamDevicePath:       fromEnvOrDefault("MKCRI_STREAM_DEVICE_PATH", "/dev/mkring_stream_bridge"),
 		KernelStartCommand:     os.Getenv("MK_KERNEL_START_COMMAND"),
 		KernelStopCommand:      os.Getenv("MK_KERNEL_STOP_COMMAND"),
 		KernelEndpointTemplate: fromEnvOrDefault("MK_KERNEL_ENDPOINT_TEMPLATE", "unix:///run/mk-kernel/%s/containerd.sock"),

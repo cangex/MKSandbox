@@ -17,7 +17,7 @@ typedef int64_t __s64;
 #endif
 
 /*
- * Phase 2 direct transport UAPI for the control plane.
+ * Direct transport UAPI used by sys_mkring_transport.
  *
  * The kernel only provides transport semantics:
  * - send one opaque message to a peer
@@ -25,14 +25,15 @@ typedef int64_t __s64;
  *
  * Message validity beyond the basic transport header and the meaning of the
  * payload are handled in userspace. The current control plane keeps using
- * serialized mkring container messages on channel 1.
+ * serialized mkring container messages on channel 1 and stream packets on
+ * channel 3.
  */
 
 #define MKRING_TRANSPORT_UAPI_VERSION          1U
 #define MKRING_TRANSPORT_MAX_MESSAGE           1024U
 
 /*
- * Direct-entry op codes for the Phase 2 transport path.
+ * Direct-entry op codes for the generic mkring transport path.
  */
 enum mkring_transport_op {
 	MKRING_TRANSPORT_OP_SEND = 1,

@@ -89,7 +89,7 @@ func main() {
 
 	engine := mkrt.NewEngine(kernelManager, agentFactory, allocator, kernelIDAlloc)
 	streamServer := streaming.NewServer(nil, cfg.StreamBaseURL)
-	streamServer.SetDataPlane(streaming.NewDeviceBridge(cfg.StreamDevicePath))
+	streamServer.SetDataPlane(streaming.NewSyscallStreamBridge(cfg.TransportSyscallNR))
 	streamServer.SetRemoteCommandAdapter(streaming.NewSPDYRemoteCommandAdapter(nil))
 
 	service := cri.NewServer(engine, cfg.RuntimeName, cfg.RuntimeVersion, streamServer)
@@ -110,7 +110,7 @@ func main() {
 
 	log.Printf("mkcri started, endpoint=unix://%s runtime=%s", socketPath, service.String())
 	log.Printf("mkcri control transport=%s transport_syscall_nr=%d", cfg.ControlTransport, cfg.TransportSyscallNR)
-	log.Printf("mkcri exec streaming started, address=%s base_url=%s device=%s", cfg.StreamListenAddress, cfg.StreamBaseURL, cfg.StreamDevicePath)
+	log.Printf("mkcri exec streaming started, address=%s base_url=%s transport=syscall nr=%d", cfg.StreamListenAddress, cfg.StreamBaseURL, cfg.TransportSyscallNR)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

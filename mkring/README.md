@@ -17,7 +17,6 @@ Core properties:
 - [mkring_transport_uapi.h](mkring_transport_uapi.h): direct-entry transport UAPI
 - [mkring_transport_syscall.c](mkring_transport_syscall.c): generic transport syscall shim plus `sys_mkring_transport` dispatch shape
 - [mkring_stream.h](mkring_stream.h): stream data-plane message headers and payloads
-- [mkring_stream_bridge.c](mkring_stream_bridge.c): host/guest stream bridge module
 - [init_mk.c](init_mk.c): kernel command-line parsing and built-in initialization entrypoint
 - [Makefile](Makefile): kernel-tree Kbuild fragment
 
@@ -112,11 +111,14 @@ The TTY exec path uses a separate stream protocol:
   - `channel = MKRING_CHANNEL_STREAM`
   - stream types: `STDIN`, `OUTPUT`, `CONTROL`
   - control kinds include `EXIT`
-- [mkring_stream_bridge.c](mkring_stream_bridge.c)
-  - exposes `/dev/mkring_stream_bridge`
-  - forwards raw stream packets between userspace and the `mkring` transport
 
-This is the path used both by the raw TTY exec smoke test and by the current CRI/SPDY `crictl exec -it` front-end.
+The stream packet format is interpreted in userspace. Host and guest stream
+backends send and receive channel-3 packets through `sys_mkring_transport`,
+while the kernel keeps only the generic transport queueing and wakeup logic.
+
+The running system therefore does not need a separate stream bridge device.
+The kernel transport layer only needs to accept channel-3 packets, queue them,
+and forward them through `mkring_send()`.
 
 ## Key Data Structures
 

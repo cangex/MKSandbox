@@ -34,19 +34,6 @@ fatal() {
 	exec $BB sh
 }
 
-wait_for_path() {
-	path="$1"
-	timeout="${2:-10}"
-	i=0
-
-	while [ "$i" -lt "$timeout" ]; do
-		[ -e "$path" ] && return 0
-		bb sleep 1
-		i=$((i + 1))
-	done
-	return 1
-}
-
 wait_for_socket() {
 	path="$1"
 	timeout="${2:-20}"
@@ -124,24 +111,6 @@ ensure_overlay_ready() {
 		fatal "overlay filesystem is not available"
 }
 
-ensure_guest_stream_device() {
-	if [ -e "$STREAM_DEVICE" ]; then
-		return 0
-	fi
-
-	if command -v modprobe >/dev/null 2>&1; then
-		modprobe mkring_stream_bridge "device_name=$STREAM_DEVICE_NAME" \
-			2>/tmp/mkring-stream.modprobe.log || true
-	fi
-
-	if [ ! -e "$STREAM_DEVICE" ] && [ -f "$STREAM_MODULE" ]; then
-		bb insmod "$STREAM_MODULE" "device_name=$STREAM_DEVICE_NAME" \
-			2>/tmp/mkring-stream.insmod.log || true
-	fi
-
-	wait_for_path "$STREAM_DEVICE" 10 || fatal "guest stream device not ready: $STREAM_DEVICE"
-}
-
 start_containerd() {
 	[ -x "$CONTAINERD_BIN" ] || fatal "containerd not found: $CONTAINERD_BIN"
 	[ -x "$CTR_BIN" ] || fatal "ctr not found: $CTR_BIN"
@@ -189,7 +158,6 @@ start_guest_agent() {
 
 	MK_GUEST_AGENT_TRANSPORT=mkring \
 	MK_GUEST_AGENT_RUNTIME=containerd \
-	MK_GUEST_AGENT_STREAM_DEVICE="$STREAM_DEVICE" \
 	MK_GUEST_AGENT_PEER_KERNEL_ID="$PEER_KERNEL_ID" \
 	MK_GUEST_AGENT_CONTAINERD_SOCKET="$CONTAINERD_SOCKET" \
 	MK_GUEST_AGENT_CTR_PATH="$CTR_BIN" \
@@ -210,7 +178,6 @@ print_summary() {
 	bb cat <<EOF
 guest init complete
 
-stream device: $STREAM_DEVICE
 containerd socket: $CONTAINERD_SOCKET
 containerd log: $CONTAINERD_LOG
 mk-guest-agent log: $AGENT_LOG
@@ -221,9 +188,6 @@ image dir: ${IMAGE_DIR:-<none>}
 EOF
 }
 
-STREAM_DEVICE="$(cmdline_get mkga.stream_device || echo /dev/mkring_stream_bridge)"
-STREAM_DEVICE_NAME="${STREAM_DEVICE##*/}"
-STREAM_MODULE="$(cmdline_get mkga.stream_module || true)"
 PEER_KERNEL_ID="$(cmdline_get mkga.peer_kernel_id || echo 0)"
 CONTAINERD_BIN="$(cmdline_get mkga.containerd_bin || true)"
 CTR_BIN="$(cmdline_get mkga.ctr_bin || true)"
@@ -236,11 +200,6 @@ OVERLAY_MODULE="$(cmdline_get mkga.overlay_module || true)"
 CONTAINERD_LOG=/tmp/containerd.log
 AGENT_LOG=/tmp/mk-guest-agent.log
 
-STREAM_MODULE="$(find_existing_path \
-	"$STREAM_MODULE" \
-	"/mkring_stream_bridge.ko" \
-	"/lib/modules/mkring_stream_bridge.ko" \
-	"/modules/mkring_stream_bridge.ko" || true)"
 CONTAINERD_BIN="$(find_existing_path \
 	"$CONTAINERD_BIN" \
 	"/bin/containerd" \
@@ -271,7 +230,6 @@ mount_core_fs
 ensure_basic_dev_nodes
 prepare_runtime_links
 ensure_overlay_ready
-ensure_guest_stream_device
 start_containerd
 import_images_if_present
 start_guest_agent

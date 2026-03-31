@@ -23,7 +23,7 @@ The main path that is working today includes:
 - guest `stdout/stderr -> host LogPath`
 - continuous log sync for long-running containers
 - manual `StopContainer`
-- TTY `Exec` over the `mkring` stream data plane
+- TTY `Exec` over the `mkring` transport path
 - `crictl exec -it` through the CRI/SPDY front-end
 
 The current control chain is:
@@ -44,6 +44,7 @@ The kernel-side control path is intentionally small:
 
 - the kernel only provides transport semantics (`SEND` / `RECV`) over `mkring`,
 - channel-1 message meaning stays in userspace,
+- channel-3 stream packet meaning also stays in userspace,
 - host userspace owns peer `READY` tracking and request/response matching,
 - guest userspace owns `READY` publication plus request decode / response encode,
 - channel 2 (`MKRING_CHANNEL_SYSTEM`) remains reserved and unused today.
@@ -53,9 +54,11 @@ The current TTY exec data path is:
 ```text
 Exec RPC
   -> mkcri streaming server
-  -> /dev/mkring_stream_bridge (host)
-  -> mkring channel 3
-  -> /dev/mkring_stream_bridge (guest)
+  -> host userspace stream transport over sys_mkring_transport
+  -> sys_mkring_transport (host, channel 3)
+  -> mkring
+  -> sys_mkring_transport (guest, channel 3)
+  -> guest userspace stream transport
   -> mk-guest-agent PTY session
   -> ctr tasks exec --tty
 ```
@@ -85,6 +88,7 @@ Main responsibilities:
 - manage the `PodSandbox -> sub-kernel` mapping,
 - manage `container -> guest runtime` lifecycle operations,
 - issue `mkring` control calls directly from the host runtime path,
+- issue exec stream packets directly from the host runtime path,
 - maintain host-side pod/container state,
 - synchronize guest state and logs back to the host,
 - host the CRI-facing TTY exec streaming endpoint, including the current SPDY front-end used by `crictl exec -it`.
@@ -97,7 +101,7 @@ Main subdirectories:
 - `pkg/runtime`: pod/container lifecycle orchestration
 - `pkg/kernel`: sub-kernel start/stop abstraction
 - `pkg/agent`: host-side per-kernel runtime clients, including the direct `mkring` path
-- `pkg/streaming`: host-side TTY exec streaming server and device data plane
+- `pkg/streaming`: host-side TTY exec streaming server and transport data plane
 - `docs`: architecture and integration documents
 
 #### Build
@@ -134,7 +138,7 @@ Main responsibilities:
 - drive `containerd` through `ctr` today,
 - maintain guest-local `.state` and `.cri.log`,
 - return status and logs through `STATUS` and `READ_LOG`,
-- host guest-side PTY exec sessions over `/dev/mkring_stream_bridge`.
+- host guest-side PTY exec sessions over the channel-3 transport path.
 
 Main source files:
 
@@ -181,12 +185,12 @@ Main responsibilities:
 - provide the control-plane protocol in `mkring_container.h`,
 - provide the direct-entry control UAPI in `mkring_transport_uapi.h`,
 - provide the stream data-plane UAPI in `mkring_stream.h`,
-- provide the stream bridge module `mkring_stream_bridge.c`
+- provide the built-in transport substrate used by both control and stream channels.
 
 In practice:
 
 - `mkring.c` and `init_mk.c` are built-in kernel components,
-- `mkring_stream_bridge.c` and `mkring_test.c` are modules.
+- `mkring_test.c` remains a module.
 
 #### Build
 
@@ -218,14 +222,6 @@ make modules_install
 depmod -a
 ```
 
-#### Runtime Loading
-
-Host / guest stream data plane:
-
-```bash
-modprobe mkring_stream_bridge device_name=mkring_stream_bridge
-```
-
 ### 3.5 `scripts`
 
 #### Responsibility
@@ -237,7 +233,6 @@ Main scripts:
 - `start-host.sh`
   - starts the host control plane,
   - starts `mkcri`,
-  - ensures `/dev/mkring_stream_bridge` exists,
   - exports the `sys_mkring_transport` syscall number to `mkcri`.
 - `init`
   - guest init script used as `/init` inside the guest initrd,
@@ -365,7 +360,6 @@ This repository is a multi-component prototype containing:
 
 When deploying, keep these pieces aligned:
 
-- host and guest copies of `mkring_stream_bridge.ko`,
 - the running kernel's `sys_mkring_transport` syscall number exported to `mkcri`,
 - `mkcri` and `mk-guest-agent` matching the current protocol version,
-- guest initrd repacked with the updated guest agent and kernel modules.
+- guest initrd repacked with the updated guest agent.

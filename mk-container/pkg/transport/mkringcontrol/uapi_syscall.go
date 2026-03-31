@@ -12,7 +12,7 @@ const (
 	transportRecvSize = 1036
 )
 
-// SyscallHostTransportUAPI is the host-side direct-entry backend for the Phase 2
+// SyscallHostTransportUAPI is the host-side direct-entry backend for the
 // transport path. The trap number must match the running kernel's
 // sys_mkring_transport syscall number.
 type SyscallHostTransportUAPI struct {

@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	// TransportUAPIVersion should match the kernel-side Phase 2 transport UAPI version.
+	// TransportUAPIVersion should match the kernel-side transport UAPI version.
 	TransportUAPIVersion = 1
 	// TransportMaxMessage should match the fixed-size message buffer in the kernel UAPI.
 	TransportMaxMessage = 1024
@@ -40,7 +40,7 @@ type TransportRecv struct {
 }
 
 // HostTransportUAPI is the minimal host-side kernel/UAPI adapter required by the
-// Phase 2 transport path. The kernel only provides send/recv semantics; ready
+// transport path. The kernel only provides send/recv semantics; ready
 // handling and request/response matching remain in userspace.
 type HostTransportUAPI interface {
 	Send(ctx context.Context, req TransportSend) error
@@ -62,7 +62,7 @@ type readyState struct {
 	ch    chan struct{}
 }
 
-// UAPITransport is the Phase 2 direct-entry control transport.
+// UAPITransport is the syscall-backed control transport.
 //
 // It preserves the existing Transport interface so callers above Service do
 // not need to change when the control bridge device is removed. The transport

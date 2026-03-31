@@ -1,5 +1,5 @@
 /*
- * Staging Phase 2 direct-entry transport implementation.
+ * Staging direct-entry transport implementation.
  *
  * This file keeps the local repo's direct-entry transport core in one place so
  * it mirrors the eventual Linux-tree shape more closely. The planned Linux
@@ -40,6 +40,12 @@
 
 #define MKCT_NAME "mkring-control"
 
+struct mkct_wire_prefix {
+	u32 magic;
+	u8 version;
+	u8 channel;
+} __attribute__((packed));
+
 struct mkct_msg_node {
 	struct list_head node;
 	u16 peer_kernel_id;
@@ -58,7 +64,7 @@ struct mkct_ctx {
 	struct mkring_info info;
 	bool started;
 	bool stopping;
-	struct mkct_rx_queue queues[MKRING_CHANNEL_CONTAINER + 1];
+	struct mkct_rx_queue queues[MKRING_CHANNEL_STREAM + 1];
 	atomic64_t rx_ok;
 	atomic64_t rx_bad;
 	atomic64_t tx_ok;
@@ -70,7 +76,8 @@ static DEFINE_MUTEX(mkct_init_lock);
 
 static bool mkct_supported_channel(u16 channel)
 {
-	return channel == MKRING_CHANNEL_CONTAINER;
+	return channel == MKRING_CHANNEL_CONTAINER ||
+	       channel == MKRING_CHANNEL_STREAM;
 }
 
 static bool mkct_valid_peer(const struct mkct_ctx *ctx, u16 peer_kernel_id)
@@ -81,11 +88,15 @@ static bool mkct_valid_peer(const struct mkct_ctx *ctx, u16 peer_kernel_id)
 
 static bool mkct_valid_message(const void *data, u32 len)
 {
-	const struct mkring_proto_header *hdr = data;
+	const struct mkct_wire_prefix *hdr = data;
 
-	if (!mkring_proto_header_valid(data, len))
-		return false;
 	if (len > MKRING_TRANSPORT_MAX_MESSAGE)
+		return false;
+	if (!hdr || len < sizeof(*hdr))
+		return false;
+	if (hdr->magic != MKRING_PROTO_MAGIC)
+		return false;
+	if (hdr->version != MKRING_PROTO_VERSION)
 		return false;
 	if (!mkct_supported_channel(hdr->channel))
 		return false;
@@ -139,7 +150,7 @@ static bool mkct_demux_validate(const void *data, u32 len, void *priv)
 static void mkct_demux_rx(u16 src_kid, const void *data, u32 len, void *priv)
 {
 	struct mkct_ctx *ctx = priv;
-	const struct mkring_proto_header *hdr = data;
+	const struct mkct_wire_prefix *hdr = data;
 	struct mkct_msg_node *node;
 
 	if (!ctx || !data || !mkct_valid_peer(ctx, src_kid) ||
@@ -174,14 +185,26 @@ static const struct mkring_demux_ops mkct_demux_ops = {
 
 static int mkct_register_demux(struct mkct_ctx *ctx)
 {
-	return mkring_demux_register_channel(MKRING_CHANNEL_CONTAINER,
+	int ret;
+
+	ret = mkring_demux_register_channel(MKRING_CHANNEL_CONTAINER,
 					    &mkct_demux_ops, ctx);
+	if (ret)
+		return ret;
+
+	ret = mkring_demux_register_channel(MKRING_CHANNEL_STREAM,
+					    &mkct_demux_ops, ctx);
+	if (ret) {
+		mkring_demux_unregister_channel(MKRING_CHANNEL_CONTAINER);
+		return ret;
+	}
+
+	return 0;
 }
 
 static int mkct_ensure_started(struct mkct_ctx *ctx)
 {
 	int ret;
-	u16 channel;
 
 	if (!ctx)
 		return -EINVAL;
@@ -203,9 +226,8 @@ static int mkct_ensure_started(struct mkct_ctx *ctx)
 		goto out_unlock;
 	}
 
-	for (channel = MKRING_CHANNEL_CONTAINER; channel <= MKRING_CHANNEL_CONTAINER;
-	     channel++)
-		mkct_queue_init(&ctx->queues[channel]);
+	mkct_queue_init(&ctx->queues[MKRING_CHANNEL_CONTAINER]);
+	mkct_queue_init(&ctx->queues[MKRING_CHANNEL_STREAM]);
 	atomic64_set(&ctx->rx_ok, 0);
 	atomic64_set(&ctx->rx_bad, 0);
 	atomic64_set(&ctx->tx_ok, 0);
@@ -224,7 +246,7 @@ out_unlock:
 
 static int mkct_send(struct mkct_ctx *ctx, const struct mkring_transport_send *req)
 {
-	const struct mkring_proto_header *hdr;
+	const struct mkct_wire_prefix *hdr;
 	int ret;
 
 	if (!ctx || !req)
@@ -238,7 +260,7 @@ static int mkct_send(struct mkct_ctx *ctx, const struct mkring_transport_send *r
 	if (!mkct_valid_message(req->message, req->message_len))
 		return -EPROTO;
 
-	hdr = (const struct mkring_proto_header *)req->message;
+	hdr = (const struct mkct_wire_prefix *)req->message;
 	if (hdr->channel != req->channel)
 		return -EINVAL;
 

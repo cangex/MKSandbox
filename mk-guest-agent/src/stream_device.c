@@ -1,10 +1,10 @@
 #include "mkga_stream.h"
 
 #include "mkring_stream.h"
+#include "mkring_transport_uapi.h"
 #include "session.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,10 +13,24 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
+
+/*
+ * Stream dataplane backend.
+ *
+ * The public mkga_stream_* API stays unchanged so the guest runtime code does
+ * not need to change. Internally this uses the generic mkring transport
+ * syscall on channel 3.
+ */
+
+enum {
+	MKGA_STREAM_RECV_TIMEOUT_MS = 1000,
+};
+
 struct mkga_stream_state {
-	int fd;
 	uint16_t peer_kernel_id;
-	char device_path[256];
 	pthread_t reader_thread;
 	pthread_mutex_t lock;
 	bool started;
@@ -25,9 +39,7 @@ struct mkga_stream_state {
 };
 
 static struct mkga_stream_state mkga_stream = {
-	.fd = -1,
 	.peer_kernel_id = 0,
-	.device_path = "/dev/mkring_stream_bridge",
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 };
 
@@ -66,72 +78,100 @@ static uint16_t mkga_stream_getenv_u16(const char *key, uint16_t fallback)
 	return (uint16_t)parsed;
 }
 
-static int mkga_stream_write_packet_locked(const struct mkring_stream_packet *packet)
+static int mkga_mkring_transport_direct(uint32_t op, void *arg)
 {
-	ssize_t nwritten;
+#if defined(__linux__) && defined(__NR_mkring_transport)
+	long rc = syscall(__NR_mkring_transport, (long)op, arg);
 
-	nwritten = write(mkga_stream.fd, packet, sizeof(*packet));
-	if (nwritten < 0) {
+	if (rc == -1) {
 		return -errno;
 	}
-	if ((size_t)nwritten != sizeof(*packet)) {
-		return -EIO;
+	return (int)rc;
+#else
+	(void)op;
+	(void)arg;
+	return -ENOSYS;
+#endif
+}
+
+static int mkga_stream_message_valid(const struct mkring_stream_message *msg)
+{
+	if (!msg) {
+		return 0;
 	}
-	return 0;
+	if (msg->hdr.magic != MKRING_STREAM_MAGIC ||
+	    msg->hdr.version != MKRING_STREAM_VERSION ||
+	    msg->hdr.channel != MKRING_STREAM_CHANNEL ||
+	    msg->hdr.payload_len > MKRING_STREAM_MAX_PAYLOAD) {
+		return 0;
+	}
+
+	switch (msg->hdr.stream_type) {
+	case MKRING_STREAM_TYPE_STDIN:
+	case MKRING_STREAM_TYPE_OUTPUT:
+	case MKRING_STREAM_TYPE_CONTROL:
+		return 1;
+	default:
+		return 0;
+	}
 }
 
 static int mkga_stream_send_packet(uint8_t stream_type, const char *session_id,
 				   const uint8_t *data, size_t len)
 {
-	struct mkring_stream_packet packet;
+	struct mkring_transport_send req;
+	struct mkring_stream_message msg;
 	int rc;
 
 	if (!session_id || len > MKRING_STREAM_MAX_PAYLOAD) {
 		return -EINVAL;
 	}
 
-	memset(&packet, 0, sizeof(packet));
-	packet.peer_kernel_id = mkga_stream.peer_kernel_id;
-	packet.msg.hdr.magic = MKRING_STREAM_MAGIC;
-	packet.msg.hdr.version = MKRING_STREAM_VERSION;
-	packet.msg.hdr.channel = MKRING_STREAM_CHANNEL;
-	packet.msg.hdr.stream_type = stream_type;
-	packet.msg.hdr.payload_len = (uint32_t)len;
-	mkga_stream_copy_string(packet.msg.hdr.session_id,
-				sizeof(packet.msg.hdr.session_id), session_id);
+	memset(&req, 0, sizeof(req));
+	req.peer_kernel_id = mkga_stream.peer_kernel_id;
+	req.channel = MKRING_STREAM_CHANNEL;
+
+	memset(&msg, 0, sizeof(msg));
+	msg.hdr.magic = MKRING_STREAM_MAGIC;
+	msg.hdr.version = MKRING_STREAM_VERSION;
+	msg.hdr.channel = MKRING_STREAM_CHANNEL;
+	msg.hdr.stream_type = stream_type;
+	msg.hdr.payload_len = (uint32_t)len;
+	mkga_stream_copy_string(msg.hdr.session_id,
+				sizeof(msg.hdr.session_id), session_id);
 	if (data && len > 0) {
-		memcpy(packet.msg.payload, data, len);
+		memcpy(msg.payload, data, len);
 	}
 
 	pthread_mutex_lock(&mkga_stream.lock);
-	packet.msg.hdr.session_seq = ++mkga_stream.next_seq;
-	rc = mkga_stream_write_packet_locked(&packet);
+	msg.hdr.session_seq = ++mkga_stream.next_seq;
+	req.message_len = sizeof(msg);
+	memcpy(req.message, &msg, sizeof(msg));
+	rc = mkga_mkring_transport_direct(MKRING_TRANSPORT_OP_SEND, &req);
 	pthread_mutex_unlock(&mkga_stream.lock);
 	return rc;
 }
 
-static int mkga_stream_handle_packet(const struct mkring_stream_packet *packet)
+static int mkga_stream_handle_message(uint16_t peer_kernel_id,
+				      const struct mkring_stream_message *msg)
 {
-	if (!packet) {
+	if (!msg) {
 		return -EINVAL;
 	}
-	if (packet->msg.hdr.magic != MKRING_STREAM_MAGIC ||
-	    packet->msg.hdr.version != MKRING_STREAM_VERSION ||
-	    packet->msg.hdr.channel != MKRING_STREAM_CHANNEL ||
-	    packet->msg.hdr.payload_len > MKRING_STREAM_MAX_PAYLOAD) {
+	if (!mkga_stream_message_valid(msg)) {
 		return -EINVAL;
 	}
 
-	switch (packet->msg.hdr.stream_type) {
+	switch (msg->hdr.stream_type) {
 	case MKRING_STREAM_TYPE_STDIN:
 		(void)fprintf(stderr,
 			      "mkga stream recv stdin session=%s peer_kernel_id=%u bytes=%u\n",
-			      packet->msg.hdr.session_id,
-			      packet->peer_kernel_id,
-			      packet->msg.hdr.payload_len);
-		return mkga_session_write_stdin(packet->msg.hdr.session_id,
-						packet->msg.payload,
-						packet->msg.hdr.payload_len);
+			      msg->hdr.session_id,
+			      peer_kernel_id,
+			      msg->hdr.payload_len);
+		return mkga_session_write_stdin(msg->hdr.session_id,
+						msg->payload,
+						msg->hdr.payload_len);
 	default:
 		return 0;
 	}
@@ -142,27 +182,43 @@ static void *mkga_stream_reader(void *arg)
 	(void)arg;
 
 	for (;;) {
-		struct mkring_stream_packet packet;
-		ssize_t nread;
+		struct mkring_transport_recv req;
+		struct mkring_stream_message msg;
+		int rc;
 
-		nread = read(mkga_stream.fd, &packet, sizeof(packet));
-		if (nread < 0) {
-			if (errno == EINTR) {
+		memset(&req, 0, sizeof(req));
+		req.channel = MKRING_STREAM_CHANNEL;
+		req.timeout_ms = MKGA_STREAM_RECV_TIMEOUT_MS;
+
+		rc = mkga_mkring_transport_direct(MKRING_TRANSPORT_OP_RECV, &req);
+		if (rc != 0) {
+			if (rc == -EINTR || rc == -ETIMEDOUT || rc == -EAGAIN) {
+				if (mkga_stream.stopping) {
+					return NULL;
+				}
 				continue;
 			}
+			(void)fprintf(stderr,
+				      "mkga stream recv failed rc=%d channel=%u\n",
+				      rc,
+				      MKRING_STREAM_CHANNEL);
 			return NULL;
 		}
-		if ((size_t)nread != sizeof(packet) || mkga_stream.stopping) {
+		if (mkga_stream.stopping) {
 			return NULL;
 		}
-		(void)mkga_stream_handle_packet(&packet);
+		if (req.message_len != sizeof(msg)) {
+			continue;
+		}
+
+		memset(&msg, 0, sizeof(msg));
+		memcpy(&msg, req.message, sizeof(msg));
+		(void)mkga_stream_handle_message(req.peer_kernel_id, &msg);
 	}
 }
 
 int mkga_stream_ensure_started(void)
 {
-	const char *device_path;
-	int fd;
 	int rc;
 
 	pthread_mutex_lock(&mkga_stream.lock);
@@ -171,29 +227,12 @@ int mkga_stream_ensure_started(void)
 		return 0;
 	}
 
-	device_path = getenv("MK_GUEST_AGENT_STREAM_DEVICE");
 	mkga_stream.peer_kernel_id =
 		mkga_stream_getenv_u16("MK_GUEST_AGENT_PEER_KERNEL_ID", 0);
-	mkga_stream_copy_string(mkga_stream.device_path, sizeof(mkga_stream.device_path),
-				device_path ? device_path : "/dev/mkring_stream_bridge");
-
-	fd = open(mkga_stream.device_path, O_RDWR);
-	if (fd < 0) {
-		rc = -errno;
-		(void)fprintf(stderr,
-			      "mkga stream open failed path=%s err=%d\n",
-			      mkga_stream.device_path,
-			      errno);
-		pthread_mutex_unlock(&mkga_stream.lock);
-		return rc;
-	}
-	mkga_stream.fd = fd;
 	mkga_stream.stopping = false;
 	mkga_stream.next_seq = 0;
 	rc = pthread_create(&mkga_stream.reader_thread, NULL, mkga_stream_reader, NULL);
 	if (rc != 0) {
-		(void)close(fd);
-		mkga_stream.fd = -1;
 		pthread_mutex_unlock(&mkga_stream.lock);
 		return -rc;
 	}

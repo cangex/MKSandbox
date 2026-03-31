@@ -2,7 +2,7 @@
 #define _MKRING_TRANSPORT_SYSCALL_H
 
 /*
- * Draft direct-entry prototype for the final Phase 2 transport path.
+ * Draft direct-entry prototype for sys_mkring_transport.
  *
  * Planned Linux source integration:
  * - move the syscall prototype into: include/linux/syscalls.h

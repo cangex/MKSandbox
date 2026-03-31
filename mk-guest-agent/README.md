@@ -32,8 +32,8 @@ host userspace control transport
   - receives channel-1 `REQUEST` messages through the direct transport entry
   - sends channel-1 `RESPONSE` messages back through the direct transport entry
 - `src/stream_device.c`
-  - data-plane stream transport for `/dev/mkring_stream_bridge`
-  - handles TTY stdin/output/exit frames
+  - data-plane stream transport built on `sys_mkring_transport`
+  - handles TTY stdin/output/exit frames on channel 3
 - `src/runtime_memory.c`
   - in-memory runtime with a minimal container state machine
 - `src/runtime_containerd_stub.c`
@@ -58,19 +58,19 @@ The direct transport UAPI comes from the shared header:
 The expected wiring is:
 
 1. guest kernel exposes `sys_mkring_transport`
-2. guest kernel loads `mkring_stream_bridge.ko`
-3. `mk-guest-agent` starts with `mkring` transport
-4. the `containerd` runtime path waits for local `containerd.sock` to become ready
-5. transport creation sends a channel-1 `READY` message
-6. the agent receives host container `REQUEST` messages through `sys_mkring_transport`
-7. the agent calls the local runtime
-8. the agent sends container `RESPONSE` messages back through `sys_mkring_transport`
-9. TTY exec traffic flows through `/dev/mkring_stream_bridge`
+2. `mk-guest-agent` starts with `mkring` transport
+3. the `containerd` runtime path waits for local `containerd.sock` to become ready
+4. transport creation sends a channel-1 `READY` message
+5. the agent receives host container `REQUEST` messages through `sys_mkring_transport`
+6. the agent calls the local runtime
+7. the agent sends container `RESPONSE` messages back through `sys_mkring_transport`
+8. TTY exec traffic flows through channel-3 transport packets over `sys_mkring_transport`
 
 The important boundary is:
 
 - the kernel syscall only moves opaque messages on a channel,
 - `mk-guest-agent` owns container-message validation and business handling,
+- `mk-guest-agent` also owns stream-packet handling for TTY stdin/output/exit,
 - channel 2 remains reserved and is not used by the guest today.
 
 ## Build
@@ -104,8 +104,6 @@ make STATIC=1
   - default: `mk`
 - `MK_GUEST_AGENT_CONTAINERD_TIMEOUT_MS`
   - default: `5000`
-- `MK_GUEST_AGENT_STREAM_DEVICE`
-  - default: `/dev/mkring_stream_bridge`
 - `MK_GUEST_AGENT_PEER_KERNEL_ID`
   - default: `0`
   - the host kernel id in the `mkring` topology
@@ -122,7 +120,7 @@ Today the guest agent supports:
 - containerd-backed long-running containers,
 - command/args passthrough,
 - guest-side CRI log generation,
-- TTY exec backed by PTY sessions and `/dev/mkring_stream_bridge`,
+- TTY exec backed by PTY sessions and the channel-3 transport path over `sys_mkring_transport`,
 - the guest-side backend used by `crictl exec -it`.
 
 What is not finished yet:

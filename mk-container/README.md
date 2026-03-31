@@ -8,6 +8,12 @@ The current architecture supports an `mkring`-based host-to-guest chain:
 mkcri -> userspace control transport -> sys_mkring_transport -> mkring -> sys_mkring_transport -> guest agent -> containerd
 ```
 
+The TTY exec stream path uses the same transport boundary on channel 3:
+
+```text
+mkcri streaming -> sys_mkring_transport -> mkring -> sys_mkring_transport -> guest PTY/session path
+```
+
 The running kernel only provides generic transport semantics:
 
 - `SEND` one opaque message to a peer/channel
@@ -19,7 +25,8 @@ Container-level meaning stays in userspace:
 - `mkcri` maintains host-side peer `READY` state and request/response matching,
 - `mk-guest-agent` publishes `READY`, receives `REQUEST`, and returns `RESPONSE`,
 - `MKRING_CHANNEL_SYSTEM` stays reserved and unused,
-- the TTY exec data plane still uses `/dev/mkring_stream_bridge`.
+- the TTY exec data plane also uses `sys_mkring_transport` on channel 3,
+- no control or stream bridge device is required in the live path.
 
 ## What Is Implemented
 
@@ -41,7 +48,7 @@ Container-level meaning stays in userspace:
 - TTY `Exec` support through:
   - CRI `Exec` URL generation,
   - host streaming server,
-  - `mkring` stream data plane,
+  - `mkring` channel-3 transport path,
   - guest PTY-backed `ctr tasks exec --tty`,
   - CRI/SPDY remotecommand compatibility for `crictl exec -it`.
 
@@ -63,7 +70,7 @@ Container-level meaning stays in userspace:
 - `pkg/runtime`: pod/container lifecycle engine
 - `pkg/kernel`: sub-kernel lifecycle control
 - `pkg/agent`: per-kernel runtime proxy and `mkring` transport client
-- `pkg/streaming`: host-side CRI/SPDY TTY exec front-end and `mkring` data-plane integration
+- `pkg/streaming`: host-side CRI/SPDY TTY exec front-end and syscall-backed channel-3 transport integration
 - `docs/`: architecture and networking details
 
 ## Quick Start
@@ -83,7 +90,6 @@ running kernel's `sys_mkring_transport` syscall number.
 ## Environment Variables
 
 - `MKCRI_LISTEN_SOCKET` (default: `/tmp/mkcri.sock`)
-- `MKCRI_STREAM_DEVICE_PATH` (default: `/dev/mkring_stream_bridge`)
 - `MK_KERNEL_START_COMMAND` (optional: command for booting a sub-kernel, receives `MK_KERNEL_ID` and `MK_KERNEL_PEER_ID`)
   - mkcri also exports `MK_KERNEL_BOOT_MODE` to this command
   - expected values:
@@ -99,7 +105,7 @@ running kernel's `sys_mkring_transport` syscall number.
 - `MK_RUNTIME_NAME` (default: `mkcri`)
 - `MK_RUNTIME_VERSION` (default: `0.1.0`)
 
-When `MK_CONTROL_TRANSPORT=mkring`, `mkcri` allocates a numeric peer-kernel-id for each sub-kernel and exports it to start/stop commands as `MK_KERNEL_PEER_ID`. Boot scripts should wire that value to the guest kernel's `mkring.kernel_id`. The control-plane runtime path also requires `MKCRI_TRANSPORT_SYSCALL_NR` to match the running kernel's `sys_mkring_transport` syscall number.
+When `MK_CONTROL_TRANSPORT=mkring`, `mkcri` allocates a numeric peer-kernel-id for each sub-kernel and exports it to start/stop commands as `MK_KERNEL_PEER_ID`. Boot scripts should wire that value to the guest kernel's `mkring.kernel_id`. Both the control plane and the exec streaming data plane use `sys_mkring_transport`, so `MKCRI_TRANSPORT_SYSCALL_NR` must match the running kernel's syscall number.
 
 Per-pod boot mode is selected through the pod sandbox annotation:
 

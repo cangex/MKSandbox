@@ -10,7 +10,6 @@ MKCRI_BIN="${MKCRI_BIN:-$ROOT_DIR/mk-container/mkcri}"
 
 MK_CONTROL_TRANSPORT="${MK_CONTROL_TRANSPORT:-mkring}"
 MKCRI_TRANSPORT_SYSCALL_NR="${MKCRI_TRANSPORT_SYSCALL_NR:-}"
-MKCRI_STREAM_DEVICE_PATH="${MKCRI_STREAM_DEVICE_PATH:-/dev/mkring_stream_bridge}"
 MKCRI_LISTEN_SOCKET="${MKCRI_LISTEN_SOCKET:-/tmp/mkcri.sock}"
 MK_KERNEL_START_COMMAND="${MK_KERNEL_START_COMMAND:-/usr/local/bin/start-subkernel}"
 MK_KERNEL_STOP_COMMAND="${MK_KERNEL_STOP_COMMAND:-/usr/local/bin/stop-subkernel}"
@@ -126,22 +125,6 @@ ensure_kernel_commands() {
 		die "MKCRI_TRANSPORT_SYSCALL_NR must be a decimal syscall number"
 }
 
-ensure_module_device() {
-	local stream_dev_name
-
-	[[ "$MK_CONTROL_TRANSPORT" == "mock" ]] && return 0
-
-	if [[ -e "$MKCRI_STREAM_DEVICE_PATH" ]]; then
-		return 0
-	fi
-
-	stream_dev_name="$(basename "$MKCRI_STREAM_DEVICE_PATH")"
-	modprobe mkring_stream_bridge "device_name=$stream_dev_name"
-
-	wait_for_path "$MKCRI_STREAM_DEVICE_PATH" 5 || \
-		die "device not ready after modprobe: $MKCRI_STREAM_DEVICE_PATH"
-}
-
 start_mkcri() {
 	rm -f "$MKCRI_LISTEN_SOCKET"
 
@@ -149,7 +132,6 @@ start_mkcri() {
 		MK_CONTROL_TRANSPORT="$MK_CONTROL_TRANSPORT" \
 		MKCRI_TRANSPORT_SYSCALL_NR="$MKCRI_TRANSPORT_SYSCALL_NR" \
 		MKCRI_LISTEN_SOCKET="$MKCRI_LISTEN_SOCKET" \
-		MKCRI_STREAM_DEVICE_PATH="$MKCRI_STREAM_DEVICE_PATH" \
 		MK_KERNEL_START_COMMAND="$MK_KERNEL_START_COMMAND" \
 		MK_KERNEL_STOP_COMMAND="$MK_KERNEL_STOP_COMMAND" \
 		"$MKCRI_BIN" \
@@ -176,7 +158,6 @@ mkcri:
 effective config:
   MK_CONTROL_TRANSPORT=$MK_CONTROL_TRANSPORT
   MKCRI_TRANSPORT_SYSCALL_NR=$MKCRI_TRANSPORT_SYSCALL_NR
-  MKCRI_STREAM_DEVICE_PATH=$MKCRI_STREAM_DEVICE_PATH
   MK_KERNEL_START_COMMAND=$MK_KERNEL_START_COMMAND
   MK_KERNEL_STOP_COMMAND=$MK_KERNEL_STOP_COMMAND
 EOF
@@ -189,7 +170,6 @@ main() {
 	ensure_kernel_commands
 	ensure_dirs
 	ensure_not_running
-	ensure_module_device
 	start_mkcri
 	print_summary
 }
