@@ -31,14 +31,22 @@ The current control chain is:
 ```text
 crictl
   -> mkcri
-  -> direct mkring control transport
-  -> /dev/mkring_container_bridge (host)
+  -> userspace control transport over sys_mkring_transport
+  -> sys_mkring_transport (host)
   -> mkring
-  -> /dev/mkring_container_bridge (guest)
+  -> sys_mkring_transport (guest)
   -> mk-guest-agent
   -> containerd / runc
   -> container process
 ```
+
+The kernel-side control path is intentionally small:
+
+- the kernel only provides transport semantics (`SEND` / `RECV`) over `mkring`,
+- channel-1 message meaning stays in userspace,
+- host userspace owns peer `READY` tracking and request/response matching,
+- guest userspace owns `READY` publication plus request decode / response encode,
+- channel 2 (`MKRING_CHANNEL_SYSTEM`) remains reserved and unused today.
 
 The current TTY exec data path is:
 
@@ -120,8 +128,7 @@ go test ./pkg/agent ./pkg/runtime ./pkg/streaming
 
 Main responsibilities:
 
-- open the guest-side `/dev/mkring_container_bridge`,
-- send `SET_READY` to the host after startup,
+- publish a channel-1 `READY` message to the host after startup,
 - receive container control requests from the host,
 - call the local guest runtime,
 - drive `containerd` through `ctr` today,
@@ -132,7 +139,7 @@ Main responsibilities:
 Main source files:
 
 - `src/agent.c`: request dispatch
-- `src/transport_device.c`: guest-side control transport
+- `src/transport_mkring.c`: guest-side direct-entry control transport
 - `src/stream_device.c`: guest-side stream data plane
 - `src/runtime_containerd_stub.c`: current `containerd` adapter
 - `src/session.c`: TTY exec session state
@@ -171,16 +178,15 @@ Main responsibilities:
 - organize `kernel -> kernel` queues in shared memory,
 - notify peer kernels through IPI,
 - expose APIs such as `mkring_send()` and `mkring_register_rx_cb()`,
-- provide the control-plane UAPI in `mkring_container.h`,
+- provide the control-plane protocol in `mkring_container.h`,
+- provide the direct-entry control UAPI in `mkring_transport_uapi.h`,
 - provide the stream data-plane UAPI in `mkring_stream.h`,
-- provide the user-facing kernel bridge modules:
-  - `mkring_container_bridge.c`
-  - `mkring_stream_bridge.c`
+- provide the stream bridge module `mkring_stream_bridge.c`
 
 In practice:
 
 - `mkring.c` and `init_mk.c` are built-in kernel components,
-- `mkring_container_bridge.c`, `mkring_stream_bridge.c`, and `mkring_test.c` are modules.
+- `mkring_stream_bridge.c` and `mkring_test.c` are modules.
 
 #### Build
 
@@ -214,17 +220,9 @@ depmod -a
 
 #### Runtime Loading
 
-Host:
+Host / guest stream data plane:
 
 ```bash
-modprobe mkring_container_bridge role=host device_name=mkring_container_bridge
-modprobe mkring_stream_bridge device_name=mkring_stream_bridge
-```
-
-Guest:
-
-```bash
-modprobe mkring_container_bridge role=guest device_name=mkring_container_bridge
 modprobe mkring_stream_bridge device_name=mkring_stream_bridge
 ```
 
@@ -239,7 +237,8 @@ Main scripts:
 - `start-host.sh`
   - starts the host control plane,
   - starts `mkcri`,
-  - ensures `/dev/mkring_container_bridge` and `/dev/mkring_stream_bridge` exist.
+  - ensures `/dev/mkring_stream_bridge` exists,
+  - exports the `sys_mkring_transport` syscall number to `mkcri`.
 - `init`
   - guest init script used as `/init` inside the guest initrd,
   - loads kernel modules,
@@ -275,7 +274,7 @@ Guest:
 The project currently supports:
 
 1. the host can boot a guest/sub-kernel through CRI,
-2. the guest completes initialization sync through `SET_READY`,
+2. the guest completes initialization sync through a channel-1 `READY` message,
 3. the host can create containers inside the guest,
 4. the host can start containers inside the guest,
 5. `ContainerConfig.command/args` are passed through to guest `ctr`,
@@ -366,7 +365,7 @@ This repository is a multi-component prototype containing:
 
 When deploying, keep these pieces aligned:
 
-- host and guest copies of `mkring_container_bridge.ko`,
 - host and guest copies of `mkring_stream_bridge.ko`,
+- the running kernel's `sys_mkring_transport` syscall number exported to `mkcri`,
 - `mkcri` and `mk-guest-agent` matching the current protocol version,
 - guest initrd repacked with the updated guest agent and kernel modules.

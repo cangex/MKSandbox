@@ -2,6 +2,7 @@
 #define MKGA_CONFIG_H
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #define MKGA_DRIVER_NAME_LEN 32
@@ -11,7 +12,6 @@ struct mkga_config {
 	char transport_driver[MKGA_DRIVER_NAME_LEN];
 	char runtime_driver[MKGA_DRIVER_NAME_LEN];
 	char containerd_socket[MKGA_SOCKET_PATH_LEN];
-	char bridge_device[MKGA_SOCKET_PATH_LEN];
 	uint16_t peer_kernel_id;
 	size_t inbound_buffer;
 	int receive_timeout_ms;

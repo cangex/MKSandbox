@@ -1,9 +1,16 @@
 CC ?= cc
 CFLAGS ?= -O2
 STATIC ?= 0
-BASE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -pedantic -Iinclude -pthread
+MKRING_TRANSPORT_SYSCALL_NR ?= 470
+BASE_CFLAGS := -std=gnu11 -Wall -Wextra -Werror -pedantic -Iinclude -I../mkring -pthread
 LDFLAGS ?=
 LDLIBS := -pthread
+
+# The guest userspace headers may not expose __NR_mkring_transport yet.
+# Default to the current experimental syscall number and allow callers to
+# override it at build time, e.g.:
+#   make STATIC=1 MKRING_TRANSPORT_SYSCALL_NR=471
+BASE_CFLAGS += -D__NR_mkring_transport=$(MKRING_TRANSPORT_SYSCALL_NR)
 
 ifeq ($(STATIC),1)
 LDFLAGS += -static
@@ -18,7 +25,7 @@ SRC := \
 	src/runtime_memory.c \
 	src/session.c \
 	src/stream_device.c \
-	src/transport_device.c \
+	src/transport_mkring.c \
 	src/transport_stub.c
 
 OBJ := $(SRC:.c=.o)
@@ -43,7 +50,7 @@ $(TEST_BIN): tests/test_agent.c \
 	src/runtime_memory.c \
 	src/session.c \
 	src/stream_device.c \
-	src/transport_device.c \
+	src/transport_mkring.c \
 	src/transport_stub.c
 	$(CC) $(BASE_CFLAGS) $(CFLAGS) -o $@ \
 		tests/test_agent.c \
@@ -54,7 +61,7 @@ $(TEST_BIN): tests/test_agent.c \
 			src/runtime_memory.c \
 			src/session.c \
 			src/stream_device.c \
-			src/transport_device.c \
+			src/transport_mkring.c \
 			src/transport_stub.c \
 			$(LDFLAGS) \
 			$(LDLIBS)

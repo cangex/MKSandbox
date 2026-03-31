@@ -809,7 +809,11 @@ func (e *Engine) RefreshContainerStatus(ctx context.Context, containerID string)
 	}
 	current.Message = remoteStatus.Message
 	if current.State == model.ContainerStateExited && current.Reason == "" {
-		current.Reason = "Completed"
+		if current.ExitCode == 0 {
+			current.Reason = "Completed"
+		} else {
+			current.Reason = "Error"
+		}
 	}
 
 	cp := *current

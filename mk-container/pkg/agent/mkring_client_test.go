@@ -103,7 +103,7 @@ func TestMkringClientLifecycle(t *testing.T) {
 }
 
 func TestMkringFactoryReturnsErrorClientForBadEndpoint(t *testing.T) {
-	factory := NewMkringFactory("/dev/mkring_container_bridge")
+	factory := NewMkringFactory(0)
 	client := factory.ForKernel("kernel-a", "http://bad")
 
 	if err := client.WaitReady(context.Background()); err == nil {

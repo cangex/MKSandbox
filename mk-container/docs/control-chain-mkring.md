@@ -13,16 +13,15 @@ The control chain is:
 
 `mkring` only exposes in-kernel APIs today. `mkcri` is a user-space Go process,
 so it cannot call `mkring_send()` / `mkring_recv()` directly. The current tree
-uses the kernel bridge module `mkring_container_bridge.c`, and `mkcri` now
-talks to that device directly through its in-process control transport. The
-complete path becomes:
+uses a dedicated direct-entry syscall (`sys_mkring_transport`) to enter the
+kernel transport shim. The complete path becomes:
 
-`mkcri -> /dev/mkring_container_bridge -> mkring -> sub-kernel /dev/mkring_container_bridge -> mk-guest-agent -> containerd`
+`mkcri -> sys_mkring_transport -> mkring -> sys_mkring_transport -> mk-guest-agent -> containerd`
 
 The host runtime still needs to:
 
 - accept CRI/runtime requests from `mkcri`,
-- hand them to the host kernel's mkring bridge,
+- hand them to the host kernel's direct `mkring` transport entry,
 - forward them to the target sub-kernel,
 - collect the response and return it to the runtime engine.
 
@@ -48,22 +47,28 @@ When `MK_CONTROL_TRANSPORT=mkring`, `kernel.Manager` returns endpoints like:
 `pkg/agent` parses the peer-kernel-id (`7`) and sends runtime operations over
 the host `mkring` control transport.
 
-## Host-side control API expected by mkcri
+## Host-side transport API expected by mkcri
 
-The host-side transport should provide the same logical operations:
+The kernel-facing syscall only provides generic transport semantics:
 
-- issue `MKRING_CONTAINER_IOC_WAIT_READY` before the first request to a peer
-- issue `MKRING_CONTAINER_IOC_CALL` for each container operation
-- let the kernel bridge module translate `CALL -> mkring REQUEST -> RESPONSE`
+- `SEND(peer_kernel_id, channel, message)`
+- `RECV(channel, timeout_ms)`
+
+The host-side userspace transport built inside `mkcri` then layers container
+semantics on top:
+
+- it publishes and observes `READY` on channel 1,
+- it matches `REQUEST` / `RESPONSE` messages by transport request id,
+- it performs timeout handling and snapshot-side ready forcing in userspace.
 
 ## Guest-side requirements
 
 The sub-kernel should run a small guest agent that:
 
-- reads `REQUEST` packets from `/dev/mkring_container_bridge`,
+- publishes a channel-1 `READY` message after local runtime init,
+- receives container `REQUEST` packets through `sys_mkring_transport`,
 - talks to local `containerd`,
-- writes `RESPONSE` packets back to `/dev/mkring_container_bridge`,
-- and after `containerd` is ready, issues `MKRING_CONTAINER_IOC_SET_READY`.
+- sends container `RESPONSE` packets back through `sys_mkring_transport`.
 
 This keeps `containerd.sock` local to the sub-kernel while still letting the
 host control the container lifecycle.

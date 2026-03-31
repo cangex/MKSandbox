@@ -4,14 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
-	"os"
-	"runtime"
-	"syscall"
 	"time"
-	"unsafe"
 )
 
 const (
@@ -19,6 +14,7 @@ const (
 	mkringContainerVersion = 1
 	mkringContainerChannel = 1
 
+	mkringContainerKindReady    = 1
 	mkringContainerKindRequest  = 2
 	mkringContainerKindResponse = 3
 
@@ -66,49 +62,7 @@ const (
 	containerReadLogResponseSize        = 400
 	containerExecTTYPrepareResponseSize = 64
 	containerErrorPayloadSize           = 132
-
-	iocNRBits   = 8
-	iocTypeBits = 8
-	iocSizeBits = 14
-	iocDirBits  = 2
-
-	iocNRShift   = 0
-	iocTypeShift = iocNRShift + iocNRBits
-	iocSizeShift = iocTypeShift + iocTypeBits
-	iocDirShift  = iocSizeShift + iocSizeBits
-
-	iocWrite = 1
-	iocRead  = 2
-
-	mkringContainerIOCMagic = 0xB7
-
-	ioctlWaitReady = uintptr(((iocRead | iocWrite) << iocDirShift) |
-		(mkringContainerIOCMagic << iocTypeShift) |
-		(0x01 << iocNRShift) |
-		(containerWaitReadySize << iocSizeShift))
-	ioctlForcePeerReady = uintptr((iocWrite << iocDirShift) |
-		(mkringContainerIOCMagic << iocTypeShift) |
-		(0x04 << iocNRShift) |
-		(containerForcePeerReadySize << iocSizeShift))
-	ioctlCall = uintptr(((iocRead | iocWrite) << iocDirShift) |
-		(mkringContainerIOCMagic << iocTypeShift) |
-		(0x03 << iocNRShift) |
-		(containerCallSize << iocSizeShift))
 )
-
-type deviceFile interface {
-	Fd() uintptr
-	Close() error
-}
-
-type fileOpener func(path string) (deviceFile, error)
-type ioctlFunc func(fd uintptr, req uintptr, arg uintptr) error
-
-type DeviceTransport struct {
-	devicePath string
-	open       fileOpener
-	ioctl      ioctlFunc
-}
 
 type containerHeader struct {
 	Magic      uint32
@@ -234,133 +188,6 @@ type containerExecTTYPrepareResponse struct {
 type containerErrorPayload struct {
 	ErrnoValue int32
 	Message    [mkringContainerMaxErrorMsg]byte
-}
-
-func NewDeviceTransport(devicePath string) *DeviceTransport {
-	return &DeviceTransport{
-		devicePath: devicePath,
-		open: func(path string) (deviceFile, error) {
-			return os.OpenFile(path, os.O_RDWR, 0)
-		},
-		ioctl: func(fd uintptr, req uintptr, arg uintptr) error {
-			_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, req, arg)
-			if errno != 0 {
-				return errno
-			}
-			return nil
-		},
-	}
-}
-
-func (t *DeviceTransport) WaitReady(ctx context.Context, peerKernelID uint16, kernelID string, timeout time.Duration) error {
-	timeoutMS, err := effectiveTimeoutMillis(ctx, timeout)
-	if err != nil {
-		return err
-	}
-
-	arg := containerWaitReady{
-		PeerKernelID: peerKernelID,
-		TimeoutMS:    timeoutMS,
-	}
-	buf, err := encodeStruct(arg, containerWaitReadySize)
-	if err != nil {
-		return err
-	}
-
-	if err := t.ioctlOnDevice(ioctlWaitReady, buf); err != nil {
-		return fmt.Errorf("wait ready peer=%d kernel=%s via %s: %w", peerKernelID, kernelID, t.devicePath, err)
-	}
-
-	var result containerWaitReady
-	if err := decodeStruct(buf, &result); err != nil {
-		return err
-	}
-	if result.Ready == 0 {
-		return fmt.Errorf("wait ready peer=%d kernel=%s via %s returned not ready", peerKernelID, kernelID, t.devicePath)
-	}
-	return nil
-}
-
-func (t *DeviceTransport) ForcePeerReady(ctx context.Context, peerKernelID uint16, kernelID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	arg := containerForcePeerReady{
-		PeerKernelID: peerKernelID,
-	}
-	buf, err := encodeStruct(arg, containerForcePeerReadySize)
-	if err != nil {
-		return err
-	}
-
-	if err := t.ioctlOnDevice(ioctlForcePeerReady, buf); err != nil {
-		return fmt.Errorf("force peer ready peer=%d kernel=%s via %s: %w", peerKernelID, kernelID, t.devicePath, err)
-	}
-
-	return nil
-}
-
-func (t *DeviceTransport) RoundTrip(ctx context.Context, peerKernelID uint16, req Envelope) (Envelope, error) {
-	call, err := t.encodeCall(ctx, peerKernelID, req)
-	if err != nil {
-		return Envelope{}, err
-	}
-
-	buf, err := encodeStruct(call, containerCallSize)
-	if err != nil {
-		return Envelope{}, err
-	}
-
-	if err := t.ioctlOnDevice(ioctlCall, buf); err != nil {
-		return Envelope{}, fmt.Errorf("call peer=%d op=%s via %s: %w", peerKernelID, req.Operation, t.devicePath, err)
-	}
-
-	var result containerCall
-	if err := decodeStruct(buf, &result); err != nil {
-		return Envelope{}, err
-	}
-
-	return decodeResponseEnvelope(req, result)
-}
-
-func (t *DeviceTransport) encodeCall(ctx context.Context, peerKernelID uint16, req Envelope) (containerCall, error) {
-	if req.Kind != MessageKindRequest {
-		return containerCall{}, fmt.Errorf("device transport expects request envelope, got %q", req.Kind)
-	}
-
-	timeoutMS, err := timeoutMillisForRequest(ctx, req)
-	if err != nil {
-		return containerCall{}, err
-	}
-
-	msg, err := encodeRequestMessage(req)
-	if err != nil {
-		return containerCall{}, err
-	}
-
-	return containerCall{
-		PeerKernelID: peerKernelID,
-		TimeoutMS:    timeoutMS,
-		Request:      msg,
-	}, nil
-}
-
-func (t *DeviceTransport) ioctlOnDevice(req uintptr, arg []byte) error {
-	if len(arg) == 0 {
-		return errors.New("empty ioctl buffer")
-	}
-
-	file, err := t.open(t.devicePath)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", t.devicePath, err)
-	}
-	defer file.Close()
-
-	err = t.ioctl(file.Fd(), req, uintptr(unsafe.Pointer(&arg[0])))
-	runtime.KeepAlive(arg)
-	runtime.KeepAlive(file)
-	return err
 }
 
 func effectiveTimeoutMillis(ctx context.Context, timeout time.Duration) (uint32, error) {

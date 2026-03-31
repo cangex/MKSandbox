@@ -379,8 +379,6 @@ func (s *Server) ContainerStatus(ctx context.Context, req *runtimeapi.ContainerS
 		},
 		State:       containerStateToCRI(ctr.State),
 		CreatedAt:   ctr.CreatedAt.UnixNano(),
-		StartedAt:   ctr.StartedAt.UnixNano(),
-		FinishedAt:  ctr.FinishedAt.UnixNano(),
 		ExitCode:    ctr.ExitCode,
 		Image:       &runtimeapi.ImageSpec{Image: ctr.Image},
 		ImageRef:    ctr.ImageRef,
@@ -389,6 +387,12 @@ func (s *Server) ContainerStatus(ctx context.Context, req *runtimeapi.ContainerS
 		Labels:      ctr.Labels,
 		Annotations: ctr.Annotations,
 		LogPath:     ctr.LogPath,
+	}
+	if !ctr.StartedAt.IsZero() {
+		statusBody.StartedAt = ctr.StartedAt.UnixNano()
+	}
+	if !ctr.FinishedAt.IsZero() {
+		statusBody.FinishedAt = ctr.FinishedAt.UnixNano()
 	}
 
 	return &runtimeapi.ContainerStatusResponse{Status: statusBody}, nil

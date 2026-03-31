@@ -38,6 +38,7 @@ int main(void)
 	struct mkga_runtime *runtime = NULL;
 	struct mkga_agent agent;
 	bool use_stub_transport = false;
+	const char *effective_transport_driver = NULL;
 	uint32_t ready_features = 0;
 	int rc;
 
@@ -66,12 +67,13 @@ int main(void)
 	if (strcmp(config.transport_driver, "stub") == 0) {
 		transport = mkga_stub_transport_create(config.inbound_buffer);
 		use_stub_transport = true;
-	} else if (strcmp(config.transport_driver, "mkring-device") == 0) {
-		transport = mkga_mkring_device_transport_create(
-			config.bridge_device,
+		effective_transport_driver = "stub";
+	} else if (strcmp(config.transport_driver, "mkring") == 0) {
+		transport = mkga_mkring_transport_create(
 			config.peer_kernel_id,
 			config.runtime_driver,
 			ready_features);
+		effective_transport_driver = "mkring";
 	} else {
 		(void)fprintf(stderr, "unsupported transport driver: %s\n",
 			      config.transport_driver);
@@ -88,7 +90,8 @@ int main(void)
 	mkga_agent_init(&agent, transport, runtime, config.receive_timeout_ms);
 	(void)fprintf(stdout,
 		      "mk-guest-agent started transport=%s runtime=%s\n",
-		      config.transport_driver,
+		      effective_transport_driver ? effective_transport_driver
+						 : config.transport_driver,
 		      config.runtime_driver);
 
 	rc = mkga_agent_serve(&agent, &mkga_stop);

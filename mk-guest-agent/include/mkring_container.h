@@ -1,8 +1,9 @@
 #ifndef MKGA_MKRING_CONTAINER_H
 #define MKGA_MKRING_CONTAINER_H
 
-#include <stdint.h>
 #include <sys/ioctl.h>
+
+#include "mkring_proto.h"
 
 #define MKRING_CONTAINER_MAGIC                   0x4d4b434eU
 #define MKRING_CONTAINER_VERSION                 1U

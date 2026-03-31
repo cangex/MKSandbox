@@ -124,24 +124,6 @@ ensure_overlay_ready() {
 		fatal "overlay filesystem is not available"
 }
 
-ensure_guest_bridge_device() {
-	if [ -e "$BRIDGE_DEVICE" ]; then
-		return 0
-	fi
-
-	if command -v modprobe >/dev/null 2>&1; then
-		modprobe mkring_container_bridge role=guest "device_name=$BRIDGE_DEVICE_NAME" \
-			2>/tmp/mkring-container.modprobe.log || true
-	fi
-
-	if [ ! -e "$BRIDGE_DEVICE" ] && [ -f "$BRIDGE_MODULE" ]; then
-		bb insmod "$BRIDGE_MODULE" role=guest "device_name=$BRIDGE_DEVICE_NAME" \
-			2>/tmp/mkring-container.insmod.log || true
-	fi
-
-	wait_for_path "$BRIDGE_DEVICE" 10 || fatal "guest bridge device not ready: $BRIDGE_DEVICE"
-}
-
 ensure_guest_stream_device() {
 	if [ -e "$STREAM_DEVICE" ]; then
 		return 0
@@ -205,9 +187,8 @@ import_images_if_present() {
 start_guest_agent() {
 	[ -x "$AGENT_BIN" ] || fatal "mk-guest-agent not found: $AGENT_BIN"
 
-	MK_GUEST_AGENT_TRANSPORT=mkring-device \
+	MK_GUEST_AGENT_TRANSPORT=mkring \
 	MK_GUEST_AGENT_RUNTIME=containerd \
-	MK_GUEST_AGENT_BRIDGE_DEVICE="$BRIDGE_DEVICE" \
 	MK_GUEST_AGENT_STREAM_DEVICE="$STREAM_DEVICE" \
 	MK_GUEST_AGENT_PEER_KERNEL_ID="$PEER_KERNEL_ID" \
 	MK_GUEST_AGENT_CONTAINERD_SOCKET="$CONTAINERD_SOCKET" \
@@ -229,7 +210,6 @@ print_summary() {
 	bb cat <<EOF
 guest init complete
 
-bridge device: $BRIDGE_DEVICE
 stream device: $STREAM_DEVICE
 containerd socket: $CONTAINERD_SOCKET
 containerd log: $CONTAINERD_LOG
@@ -241,9 +221,6 @@ image dir: ${IMAGE_DIR:-<none>}
 EOF
 }
 
-BRIDGE_DEVICE="$(cmdline_get mkga.bridge_device || echo /dev/mkring_container_bridge)"
-BRIDGE_DEVICE_NAME="${BRIDGE_DEVICE##*/}"
-BRIDGE_MODULE="$(cmdline_get mkga.bridge_module || true)"
 STREAM_DEVICE="$(cmdline_get mkga.stream_device || echo /dev/mkring_stream_bridge)"
 STREAM_DEVICE_NAME="${STREAM_DEVICE##*/}"
 STREAM_MODULE="$(cmdline_get mkga.stream_module || true)"
@@ -259,11 +236,6 @@ OVERLAY_MODULE="$(cmdline_get mkga.overlay_module || true)"
 CONTAINERD_LOG=/tmp/containerd.log
 AGENT_LOG=/tmp/mk-guest-agent.log
 
-BRIDGE_MODULE="$(find_existing_path \
-	"$BRIDGE_MODULE" \
-	"/mkring_container_bridge.ko" \
-	"/lib/modules/mkring_container_bridge.ko" \
-	"/modules/mkring_container_bridge.ko" || true)"
 STREAM_MODULE="$(find_existing_path \
 	"$STREAM_MODULE" \
 	"/mkring_stream_bridge.ko" \
@@ -299,7 +271,6 @@ mount_core_fs
 ensure_basic_dev_nodes
 prepare_runtime_links
 ensure_overlay_ready
-ensure_guest_bridge_device
 ensure_guest_stream_device
 start_containerd
 import_images_if_present

@@ -11,14 +11,15 @@ Core properties:
 
 ## Files
 
-- [mkring.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring.c): core ring and communication implementation
-- [mkring.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring.h): exported APIs such as `mkring_init()` and `mkring_send()`
-- [mkring_container.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container.h): control-plane message headers, payloads, and ioctl definitions
-- [mkring_stream.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_stream.h): stream data-plane message headers and payloads
-- [mkring_container_bridge.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container_bridge.c): host/guest control-plane bridge module
-- [mkring_stream_bridge.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_stream_bridge.c): host/guest stream bridge module
-- [init_mk.c](/Users/yezhucan/Desktop/mk%20container/mkring/init_mk.c): kernel command-line parsing and built-in initialization entrypoint
-- [Makefile](/Users/yezhucan/Desktop/mk%20container/mkring/Makefile): kernel-tree Kbuild fragment
+- [mkring.c](mkring.c): core ring and communication implementation
+- [mkring.h](mkring.h): exported APIs such as `mkring_init()` and `mkring_send()`
+- [mkring_container.h](mkring_container.h): control-plane message headers and payloads
+- [mkring_transport_uapi.h](mkring_transport_uapi.h): direct-entry transport UAPI
+- [mkring_transport_syscall.c](mkring_transport_syscall.c): generic transport syscall shim plus `sys_mkring_transport` dispatch shape
+- [mkring_stream.h](mkring_stream.h): stream data-plane message headers and payloads
+- [mkring_stream_bridge.c](mkring_stream_bridge.c): host/guest stream bridge module
+- [init_mk.c](init_mk.c): kernel command-line parsing and built-in initialization entrypoint
+- [Makefile](Makefile): kernel-tree Kbuild fragment
 
 ## Built-in Initialization Path
 
@@ -63,70 +64,55 @@ mkring.shm_phys=0x90000000 mkring.shm_size=0x200000 mkring.kernel_id=1 mkring.ke
 - `void mkring_handle_ipi_all(void);`
 - `void mkring_ipi_interrupt(void);`
 
-## Control-Plane Extension
+## Control-Plane Transport Extension
 
-To support the `mkcri -> sub-kernel -> containerd` control chain, the tree includes a control-specific protocol:
+To support the `mkcri -> sub-kernel -> containerd` control chain, the tree includes a container-channel message protocol and a direct-entry transport UAPI:
 
-- [mkring_container.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container.h)
+- [mkring_container.h](mkring_container.h)
   - defines the container message header and payloads
   - `magic = MKRING_CONTAINER_MAGIC`
   - `channel = MKRING_CHANNEL_CONTAINER`
   - `kind = READY / REQUEST / RESPONSE`
   - `operation = CREATE / START / STOP / REMOVE / STATUS / READ_LOG / EXEC_TTY_*`
-- [mkring_container_bridge.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container_bridge.c)
-  - provides the host/guest userspace-facing bridge module
-  - interrupt context only validates and queues work
-  - worker or process context handles READY / REQUEST / RESPONSE processing
-  - exposes `/dev/mkring_container_bridge`
+- [mkring_transport_uapi.h](mkring_transport_uapi.h)
+  - defines the generic send/recv structs and opcodes used by `sys_mkring_transport`
+- [mkring_transport_syscall.c](mkring_transport_syscall.c)
+  - carries the transport queueing/dispatch logic and the direct-entry syscall shape
+
+The intended boundary is:
+
+- the kernel knows only transport concepts: `peer`, `channel`, `message bytes`, queueing, timeout, wakeup,
+- the kernel does not understand container operations such as `CREATE`, `STATUS`, or `EXEC_TTY_*`,
+- userspace owns message validity beyond the basic transport header,
+- userspace owns `READY` semantics and request/response matching,
+- `MKRING_CHANNEL_SYSTEM` remains reserved and unused.
 
 ### Userspace Interface
 
-`mkring_container_bridge` exposes the UAPI from [mkring_container.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_container.h):
+`sys_mkring_transport` consumes the UAPI from [mkring_transport_uapi.h](mkring_transport_uapi.h):
 
-- `MKRING_CONTAINER_IOC_WAIT_READY`
-  - host waits for a sub-kernel `READY`
-- `MKRING_CONTAINER_IOC_CALL`
-  - host sends a container request and synchronously waits for a response
-- `MKRING_CONTAINER_IOC_SET_READY`
-  - guest announces readiness after runtime startup
-- `read()`
-  - guest blocks waiting for host requests
-- `write()`
-  - guest writes a response back to the module, which sends it to the host
-
-### Typical Loading
-
-Host kernel:
-
-```bash
-insmod mkring_container_bridge.ko role=host device_name=mkring_container_bridge
-```
-
-Sub-kernel:
-
-```bash
-insmod mkring_container_bridge.ko role=guest device_name=mkring_container_bridge
-```
+- `SEND`
+- `RECV`
 
 Typical sequence:
 
 1. the sub-kernel completes `mkring_init`
 2. guest userspace starts `containerd`
-3. guest userspace issues `MKRING_CONTAINER_IOC_SET_READY`
-4. host userspace waits with `MKRING_CONTAINER_IOC_WAIT_READY`
-5. host userspace sends `MKRING_CONTAINER_IOC_CALL`
-6. guest userspace receives the request, forwards it to `containerd.sock`, and returns the response through `write()`
+3. guest userspace publishes a channel-1 `READY` message with `SEND`
+4. host userspace receives that message through `RECV` and marks the peer ready in userspace
+5. host userspace sends a channel-1 container `REQUEST` through `SEND`
+6. guest userspace receives the request with `RECV`, forwards it to `containerd.sock`, and returns the response through `SEND`
 
 ## Stream Data-Plane Extension
 
 The TTY exec path uses a separate stream protocol:
 
-- [mkring_stream.h](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_stream.h)
+- [mkring_stream.h](mkring_stream.h)
   - defines the stream message header and payloads
   - `channel = MKRING_CHANNEL_STREAM`
   - stream types: `STDIN`, `OUTPUT`, `CONTROL`
   - control kinds include `EXIT`
-- [mkring_stream_bridge.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_stream_bridge.c)
+- [mkring_stream_bridge.c](mkring_stream_bridge.c)
   - exposes `/dev/mkring_stream_bridge`
   - forwards raw stream packets between userspace and the `mkring` transport
 
@@ -364,7 +350,7 @@ If the destination is not ready, `mkring_send()` returns `-ENOLINK`. If no notif
 
 ### Test Idea
 
-The tree includes [mkring_test.c](/Users/yezhucan/Desktop/mk%20container/mkring/mkring_test.c), which repeatedly sends test traffic to a peer and prints `tx_ok/tx_fail/rx_ok/rx_bad` counters.
+The tree includes [mkring_test.c](mkring_test.c), which repeatedly sends test traffic to a peer and prints `tx_ok/tx_fail/rx_ok/rx_bad` counters.
 
 ### Module Parameters
 

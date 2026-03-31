@@ -7,19 +7,23 @@ import (
 )
 
 type MkringFactory struct {
-	mu         sync.Mutex
-	devicePath string
-	service    *mkringcontrol.Service
-	clients    map[string]Client
+	mu      sync.Mutex
+	service *mkringcontrol.Service
+	clients map[string]Client
 }
 
-func NewMkringFactory(devicePath string) *MkringFactory {
-	transport := mkringcontrol.NewDeviceTransport(devicePath)
+func NewMkringFactory(syscallTrap uintptr) *MkringFactory {
+	transport := mkringcontrol.NewUAPITransport(
+		mkringcontrol.NewSyscallHostTransportUAPI(syscallTrap),
+	)
+	return newMkringFactory(transport)
+}
+
+func newMkringFactory(transport mkringcontrol.Transport) *MkringFactory {
 	service := mkringcontrol.New(transport)
 	return &MkringFactory{
-		devicePath: devicePath,
-		service:    service,
-		clients:    map[string]Client{},
+		service: service,
+		clients: map[string]Client{},
 	}
 }
 

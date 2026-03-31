@@ -5,8 +5,21 @@
 The current architecture supports an `mkring`-based host-to-guest chain:
 
 ```text
-mkcri -> direct mkring control transport -> mkring -> guest agent -> containerd
+mkcri -> userspace control transport -> sys_mkring_transport -> mkring -> sys_mkring_transport -> guest agent -> containerd
 ```
+
+The running kernel only provides generic transport semantics:
+
+- `SEND` one opaque message to a peer/channel
+- `RECV` one opaque message from a channel queue
+
+Container-level meaning stays in userspace:
+
+- `mkcri` encodes/decodes channel-1 container messages,
+- `mkcri` maintains host-side peer `READY` state and request/response matching,
+- `mk-guest-agent` publishes `READY`, receives `REQUEST`, and returns `RESPONSE`,
+- `MKRING_CHANNEL_SYSTEM` stays reserved and unused,
+- the TTY exec data plane still uses `/dev/mkring_stream_bridge`.
 
 ## What Is Implemented
 
@@ -17,7 +30,7 @@ mkcri -> direct mkring control transport -> mkring -> guest agent -> containerd
 - Peer-kernel-id allocation for `mkring` control-plane routing.
 - Guest runtime abstraction (`agent.Factory`) with:
   - a runnable mock backend,
-  - an in-process `mkring` backend (default and only runtime path).
+  - an `mkring` backend built on `sys_mkring_transport` (default and only runtime path).
 - Pod IP allocation.
 - `command/args` passthrough from CRI to the guest `ctr` invocation.
 - Host-side monitor loop for:
@@ -49,7 +62,7 @@ mkcri -> direct mkring control transport -> mkring -> guest agent -> containerd
 - `pkg/cri`: CRI service handlers
 - `pkg/runtime`: pod/container lifecycle engine
 - `pkg/kernel`: sub-kernel lifecycle control
-- `pkg/agent`: per-kernel runtime proxy and `mkring` bridge client
+- `pkg/agent`: per-kernel runtime proxy and `mkring` transport client
 - `pkg/streaming`: host-side CRI/SPDY TTY exec front-end and `mkring` data-plane integration
 - `docs/`: architecture and networking details
 
@@ -60,10 +73,12 @@ go get google.golang.org/grpc@v1.40.0
 go get k8s.io/cri-api@v0.23.0
 go mod tidy
 go test ./...
-go run ./cmd/mkcri
+MKCRI_TRANSPORT_SYSCALL_NR=<sys_mkring_transport_number> go run ./cmd/mkcri
 ```
 
 By default, mkcri listens on `unix:///tmp/mkcri.sock`.
+When `MK_CONTROL_TRANSPORT=mkring`, `MKCRI_TRANSPORT_SYSCALL_NR` must match the
+running kernel's `sys_mkring_transport` syscall number.
 
 ## Environment Variables
 
@@ -76,7 +91,7 @@ By default, mkcri listens on `unix:///tmp/mkcri.sock`.
     - `snapshot`
 - `MK_KERNEL_STOP_COMMAND` (optional: command for stopping a sub-kernel)
 - `MK_CONTROL_TRANSPORT` (default: `mkring`, supported: `mock`, `mkring`)
-- `MKCRI_CONTROL_DEVICE_PATH` (default: `/dev/mkring_container_bridge`)
+- `MKCRI_TRANSPORT_SYSCALL_NR` (required when `MK_CONTROL_TRANSPORT=mkring`)
 - `MK_KERNEL_PEER_ID_BASE` (default: `1`)
 - `MK_KERNEL_PEER_ID_MAX` (default: `255`)
 - `MK_POD_CIDR_BASE` (default: `10.240.0.0`)
@@ -84,7 +99,7 @@ By default, mkcri listens on `unix:///tmp/mkcri.sock`.
 - `MK_RUNTIME_NAME` (default: `mkcri`)
 - `MK_RUNTIME_VERSION` (default: `0.1.0`)
 
-When `MK_CONTROL_TRANSPORT=mkring`, `mkcri` allocates a numeric peer-kernel-id for each sub-kernel and exports it to start/stop commands as `MK_KERNEL_PEER_ID`. Boot scripts should wire that value to the guest kernel's `mkring.kernel_id`.
+When `MK_CONTROL_TRANSPORT=mkring`, `mkcri` allocates a numeric peer-kernel-id for each sub-kernel and exports it to start/stop commands as `MK_KERNEL_PEER_ID`. Boot scripts should wire that value to the guest kernel's `mkring.kernel_id`. The control-plane runtime path also requires `MKCRI_TRANSPORT_SYSCALL_NR` to match the running kernel's `sys_mkring_transport` syscall number.
 
 Per-pod boot mode is selected through the pod sandbox annotation:
 

@@ -36,8 +36,7 @@ int mkga_stub_transport_pop_response(struct mkga_transport *transport,
 				     struct mkga_envelope *resp,
 				     int timeout_ms);
 void mkga_stub_transport_shutdown(struct mkga_transport *transport);
-struct mkga_transport *mkga_mkring_device_transport_create(
-	const char *device_path,
+struct mkga_transport *mkga_mkring_transport_create(
 	uint16_t peer_kernel_id,
 	const char *runtime_name,
 	uint32_t features);

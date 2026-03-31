@@ -8,10 +8,10 @@ PID_DIR="${HOST_PID_DIR:-$RUN_DIR/pids}"
 
 MKCRI_BIN="${MKCRI_BIN:-$ROOT_DIR/mk-container/mkcri}"
 
-MKCRI_CONTROL_DEVICE_PATH="${MKCRI_CONTROL_DEVICE_PATH:-/dev/mkring_container_bridge}"
+MK_CONTROL_TRANSPORT="${MK_CONTROL_TRANSPORT:-mkring}"
+MKCRI_TRANSPORT_SYSCALL_NR="${MKCRI_TRANSPORT_SYSCALL_NR:-}"
 MKCRI_STREAM_DEVICE_PATH="${MKCRI_STREAM_DEVICE_PATH:-/dev/mkring_stream_bridge}"
 MKCRI_LISTEN_SOCKET="${MKCRI_LISTEN_SOCKET:-/tmp/mkcri.sock}"
-MK_CONTROL_TRANSPORT="${MK_CONTROL_TRANSPORT:-mkring}"
 MK_KERNEL_START_COMMAND="${MK_KERNEL_START_COMMAND:-/usr/local/bin/start-subkernel}"
 MK_KERNEL_STOP_COMMAND="${MK_KERNEL_STOP_COMMAND:-/usr/local/bin/stop-subkernel}"
 
@@ -121,23 +121,15 @@ ensure_kernel_commands() {
 	[[ "$MK_CONTROL_TRANSPORT" == "mock" ]] && return 0
 	require_file "$MK_KERNEL_START_COMMAND"
 	require_file "$MK_KERNEL_STOP_COMMAND"
+	[[ -n "$MKCRI_TRANSPORT_SYSCALL_NR" ]] || die "MKCRI_TRANSPORT_SYSCALL_NR must be set for mkring control transport"
+	[[ "$MKCRI_TRANSPORT_SYSCALL_NR" =~ ^[0-9]+$ ]] || \
+		die "MKCRI_TRANSPORT_SYSCALL_NR must be a decimal syscall number"
 }
 
 ensure_module_device() {
-	local dev_name
 	local stream_dev_name
 
 	[[ "$MK_CONTROL_TRANSPORT" == "mock" ]] && return 0
-
-	if [[ -e "$MKCRI_CONTROL_DEVICE_PATH" ]]; then
-		:
-	else
-		dev_name="$(basename "$MKCRI_CONTROL_DEVICE_PATH")"
-		modprobe mkring_container_bridge role=host "device_name=$dev_name"
-
-		wait_for_path "$MKCRI_CONTROL_DEVICE_PATH" 5 || \
-			die "device not ready after modprobe: $MKCRI_CONTROL_DEVICE_PATH"
-	fi
 
 	if [[ -e "$MKCRI_STREAM_DEVICE_PATH" ]]; then
 		return 0
@@ -155,7 +147,7 @@ start_mkcri() {
 
 	nohup env \
 		MK_CONTROL_TRANSPORT="$MK_CONTROL_TRANSPORT" \
-		MKCRI_CONTROL_DEVICE_PATH="$MKCRI_CONTROL_DEVICE_PATH" \
+		MKCRI_TRANSPORT_SYSCALL_NR="$MKCRI_TRANSPORT_SYSCALL_NR" \
 		MKCRI_LISTEN_SOCKET="$MKCRI_LISTEN_SOCKET" \
 		MKCRI_STREAM_DEVICE_PATH="$MKCRI_STREAM_DEVICE_PATH" \
 		MK_KERNEL_START_COMMAND="$MK_KERNEL_START_COMMAND" \
@@ -183,7 +175,7 @@ mkcri:
 
 effective config:
   MK_CONTROL_TRANSPORT=$MK_CONTROL_TRANSPORT
-  MKCRI_CONTROL_DEVICE_PATH=$MKCRI_CONTROL_DEVICE_PATH
+  MKCRI_TRANSPORT_SYSCALL_NR=$MKCRI_TRANSPORT_SYSCALL_NR
   MKCRI_STREAM_DEVICE_PATH=$MKCRI_STREAM_DEVICE_PATH
   MK_KERNEL_START_COMMAND=$MK_KERNEL_START_COMMAND
   MK_KERNEL_STOP_COMMAND=$MK_KERNEL_STOP_COMMAND

@@ -12,8 +12,8 @@ It keeps the original layered design while using a conventional C project layout
 ## Request Handling Flow
 
 ```text
-host direct mkring control transport
-  -> guest-side mkring bridge
+host userspace control transport
+  -> guest-side direct mkring syscall backend
   -> mkga_transport_receive()
   -> mkga_agent_handle()
   -> mkga_runtime_*
@@ -26,10 +26,11 @@ host direct mkring control transport
   - request dispatch for create/start/stop/remove/status/read-log and TTY exec control operations
 - `src/transport_stub.c`
   - pthread-based stub transport for local debugging
-- `src/transport_device.c`
-  - control-plane device transport for `/dev/mkring_container_bridge`
-  - sends `MKRING_CONTAINER_IOC_SET_READY` at startup
-  - forwards `REQUEST/RESPONSE` through `read()` / `write()`
+- `src/transport_mkring.c`
+  - control-plane transport built on `sys_mkring_transport`
+  - publishes a `READY` message at startup
+  - receives channel-1 `REQUEST` messages through the direct transport entry
+  - sends channel-1 `RESPONSE` messages back through the direct transport entry
 - `src/stream_device.c`
   - data-plane stream transport for `/dev/mkring_stream_bridge`
   - handles TTY stdin/output/exit frames
@@ -43,26 +44,34 @@ host direct mkring control transport
 - `src/protocol.c`
   - control-message helpers, error payloads, and response builders
 
-## How It Integrates With the mkring Kernel Bridges
+## How It Integrates With the mkring Transport Layer
 
-`mk-guest-agent` carries guest-side mirrored ABI definitions for:
+`mk-guest-agent` carries guest-side mirrored protocol headers for:
 
 - `include/mkring_container.h`
 - `include/mkring_stream.h`
 
-instead of including kernel-tree headers directly.
+The direct transport UAPI comes from the shared header:
+
+- [mkring_transport_uapi.h](../mkring/mkring_transport_uapi.h)
 
 The expected wiring is:
 
-1. guest kernel loads `mkring_container_bridge.ko role=guest`
+1. guest kernel exposes `sys_mkring_transport`
 2. guest kernel loads `mkring_stream_bridge.ko`
-3. `mk-guest-agent` starts with `mkring-device` transport on `/dev/mkring_container_bridge`
+3. `mk-guest-agent` starts with `mkring` transport
 4. the `containerd` runtime path waits for local `containerd.sock` to become ready
-5. transport creation sends `MKRING_CONTAINER_IOC_SET_READY`
-6. the agent receives host `REQUEST`s through `read()`
+5. transport creation sends a channel-1 `READY` message
+6. the agent receives host container `REQUEST` messages through `sys_mkring_transport`
 7. the agent calls the local runtime
-8. the agent writes `RESPONSE`s back through the kernel bridge
+8. the agent sends container `RESPONSE` messages back through `sys_mkring_transport`
 9. TTY exec traffic flows through `/dev/mkring_stream_bridge`
+
+The important boundary is:
+
+- the kernel syscall only moves opaque messages on a channel,
+- `mk-guest-agent` owns container-message validation and business handling,
+- channel 2 remains reserved and is not used by the guest today.
 
 ## Build
 
@@ -83,7 +92,7 @@ make STATIC=1
 
 - `MK_GUEST_AGENT_TRANSPORT`
   - default: `stub`
-  - real control path: `mkring-device`
+  - real control path: `mkring`
 - `MK_GUEST_AGENT_RUNTIME`
   - default: `memory`
   - real runtime: `containerd`
@@ -95,8 +104,6 @@ make STATIC=1
   - default: `mk`
 - `MK_GUEST_AGENT_CONTAINERD_TIMEOUT_MS`
   - default: `5000`
-- `MK_GUEST_AGENT_BRIDGE_DEVICE`
-  - default: `/dev/mkring_container_bridge`
 - `MK_GUEST_AGENT_STREAM_DEVICE`
   - default: `/dev/mkring_stream_bridge`
 - `MK_GUEST_AGENT_PEER_KERNEL_ID`

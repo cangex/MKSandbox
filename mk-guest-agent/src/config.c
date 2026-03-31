@@ -63,7 +63,6 @@ void mkga_config_load_from_env(struct mkga_config *config)
 	const char *transport_driver = getenv("MK_GUEST_AGENT_TRANSPORT");
 	const char *runtime_driver = getenv("MK_GUEST_AGENT_RUNTIME");
 	const char *containerd_socket = getenv("MK_GUEST_AGENT_CONTAINERD_SOCKET");
-	const char *bridge_device = getenv("MK_GUEST_AGENT_BRIDGE_DEVICE");
 
 	if (!config) {
 		return;
@@ -79,9 +78,6 @@ void mkga_config_load_from_env(struct mkga_config *config)
 			 sizeof(config->containerd_socket),
 			 containerd_socket ? containerd_socket
 					  : "/run/containerd/containerd.sock");
-	mkga_copy_string(config->bridge_device,
-			 sizeof(config->bridge_device),
-			 bridge_device ? bridge_device : "/dev/mkring_container_bridge");
 	config->peer_kernel_id =
 		mkga_getenv_u16("MK_GUEST_AGENT_PEER_KERNEL_ID", 0);
 	config->inbound_buffer = (size_t)mkga_getenv_int(
