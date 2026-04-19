@@ -92,6 +92,10 @@ const char *mkga_operation_name(enum mkga_operation operation)
 		return "exec_tty_resize";
 	case MKGA_OP_EXEC_TTY_CLOSE:
 		return "exec_tty_close";
+	case MKGA_OP_CONFIGURE_NETWORK:
+		return "configure_network";
+	case MKGA_OP_CONFIGURE_ENV:
+		return "configure_env";
 	default:
 		return "invalid";
 	}

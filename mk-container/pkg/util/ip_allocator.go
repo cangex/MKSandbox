@@ -43,6 +43,16 @@ func NewIPAllocator(baseIP string, mask int) (*IPAllocator, error) {
 	}, nil
 }
 
+func (a *IPAllocator) CIDR() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.network == nil {
+		return ""
+	}
+	return a.network.String()
+}
+
 // Allocate returns next available pod IP.
 func (a *IPAllocator) Allocate() (string, error) {
 	a.mu.Lock()

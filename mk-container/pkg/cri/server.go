@@ -80,6 +80,23 @@ func resolveContainerLogPath(logPath string, sandboxCfg *runtimeapi.PodSandboxCo
 	return filepath.Join(sandboxCfg.GetLogDirectory(), logPath)
 }
 
+func containerEnvs(envs []*runtimeapi.KeyValue) []mkrt.EnvVar {
+	if len(envs) == 0 {
+		return nil
+	}
+	out := make([]mkrt.EnvVar, 0, len(envs))
+	for _, env := range envs {
+		if env == nil || env.GetKey() == "" {
+			continue
+		}
+		out = append(out, mkrt.EnvVar{
+			Key:   env.GetKey(),
+			Value: env.GetValue(),
+		})
+	}
+	return out
+}
+
 func (s *Server) Version(_ context.Context, req *runtimeapi.VersionRequest) (*runtimeapi.VersionResponse, error) {
 	version := req.GetVersion()
 	if version == "" {
@@ -220,6 +237,7 @@ func (s *Server) CreateContainer(ctx context.Context, req *runtimeapi.CreateCont
 		Image:       cfg.GetImage().GetImage(),
 		Command:     append([]string(nil), cfg.GetCommand()...),
 		Args:        append([]string(nil), cfg.GetArgs()...),
+		Env:         containerEnvs(cfg.GetEnvs()),
 		Labels:      cfg.GetLabels(),
 		Annotations: cfg.GetAnnotations(),
 		LogPath:     resolveContainerLogPath(cfg.GetLogPath(), req.GetSandboxConfig()),

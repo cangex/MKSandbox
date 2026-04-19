@@ -71,6 +71,14 @@ func (c *readyClient) ForcePeerReady(_ context.Context) error {
 	return nil
 }
 
+func (c *readyClient) ConfigureNetwork(_ context.Context, _ agent.NetworkSpec) error {
+	return nil
+}
+
+func (c *readyClient) ConfigureContainerEnv(_ context.Context, _ string, _ string, _ []agent.EnvVar) error {
+	return nil
+}
+
 func (c *readyClient) CreateContainer(_ context.Context, _ agent.ContainerSpec) (string, string, error) {
 	if c.containers == nil {
 		c.containers = map[string]struct{}{}

@@ -24,6 +24,8 @@
 #define MKRING_CONTAINER_OP_EXEC_TTY_START       8U
 #define MKRING_CONTAINER_OP_EXEC_TTY_RESIZE      9U
 #define MKRING_CONTAINER_OP_EXEC_TTY_CLOSE       10U
+#define MKRING_CONTAINER_OP_CONFIGURE_NETWORK   11U
+#define MKRING_CONTAINER_OP_CONFIGURE_ENV       12U
 
 #define MKRING_CONTAINER_STATE_UNKNOWN           0U
 #define MKRING_CONTAINER_STATE_CREATED           1U
@@ -44,6 +46,13 @@
 #define MKRING_CONTAINER_MAX_IMAGE_REF           256U
 #define MKRING_CONTAINER_MAX_ERROR_MSG           128U
 #define MKRING_CONTAINER_MAX_LOG_CHUNK           384U
+#define MKRING_CONTAINER_MAX_IP                  16U
+#define MKRING_CONTAINER_MAX_CIDR                24U
+#define MKRING_CONTAINER_MAX_MODE                16U
+#define MKRING_CONTAINER_MAX_ENDPOINTS           16U
+#define MKRING_CONTAINER_MAX_PORTS               32U
+#define MKRING_CONTAINER_MAX_ENV_KEY             64U
+#define MKRING_CONTAINER_MAX_ENV_VALUE           256U
 
 struct mkring_container_header {
 	uint32_t magic;
@@ -145,6 +154,32 @@ struct mkring_container_exec_tty_close_request {
 	char session_id[MKRING_CONTAINER_MAX_CONTAINER_ID];
 } __attribute__((packed));
 
+struct mkring_container_network_endpoint {
+	char ip[MKRING_CONTAINER_MAX_IP];
+	uint16_t peer_kernel_id;
+	uint16_t reserved0;
+} __attribute__((packed));
+
+struct mkring_container_configure_network_request {
+	char kernel_id[MKRING_CONTAINER_MAX_KERNEL_ID];
+	char pod_id[MKRING_CONTAINER_MAX_POD_ID];
+	char pod_ip[MKRING_CONTAINER_MAX_IP];
+	char pod_cidr[MKRING_CONTAINER_MAX_CIDR];
+	char mode[MKRING_CONTAINER_MAX_MODE];
+	uint32_t endpoint_count;
+	uint32_t port_count;
+	struct mkring_container_network_endpoint endpoints[MKRING_CONTAINER_MAX_ENDPOINTS];
+	uint16_t ports[MKRING_CONTAINER_MAX_PORTS];
+} __attribute__((packed));
+
+struct mkring_container_configure_env_request {
+	char kernel_id[MKRING_CONTAINER_MAX_KERNEL_ID];
+	char pod_id[MKRING_CONTAINER_MAX_POD_ID];
+	char name[MKRING_CONTAINER_MAX_NAME];
+	char key[MKRING_CONTAINER_MAX_ENV_KEY];
+	char value[MKRING_CONTAINER_MAX_ENV_VALUE];
+} __attribute__((packed));
+
 struct mkring_container_error_payload {
 	int32_t errno_value;
 	char message[MKRING_CONTAINER_MAX_ERROR_MSG];
@@ -164,6 +199,8 @@ union mkring_container_payload {
 	struct mkring_container_exec_tty_start_request exec_tty_start_req;
 	struct mkring_container_exec_tty_resize_request exec_tty_resize_req;
 	struct mkring_container_exec_tty_close_request exec_tty_close_req;
+	struct mkring_container_configure_network_request configure_network_req;
+	struct mkring_container_configure_env_request configure_env_req;
 	struct mkring_container_error_payload error;
 } __attribute__((packed));
 

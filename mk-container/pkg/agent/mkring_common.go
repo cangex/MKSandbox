@@ -46,6 +46,14 @@ func (c errorClient) WaitReady(_ context.Context) error {
 	return c.err
 }
 
+func (c errorClient) ConfigureNetwork(_ context.Context, _ NetworkSpec) error {
+	return c.err
+}
+
+func (c errorClient) ConfigureContainerEnv(_ context.Context, _, _ string, _ []EnvVar) error {
+	return c.err
+}
+
 func (c errorClient) StartContainer(_ context.Context, _ string) error {
 	return c.err
 }

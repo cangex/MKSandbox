@@ -33,6 +33,43 @@ func (c *mkringClient) ForcePeerReady(ctx context.Context) error {
 	return c.service.ForcePeerReady(ctx, c.peerKernelID, c.kernelID)
 }
 
+func (c *mkringClient) ConfigureNetwork(ctx context.Context, spec NetworkSpec) error {
+	endpoints := make([]mkringcontrol.NetworkEndpoint, 0, len(spec.Endpoints))
+	for _, ep := range spec.Endpoints {
+		endpoints = append(endpoints, mkringcontrol.NetworkEndpoint{
+			IP:           ep.IP,
+			PeerKernelID: ep.PeerKernelID,
+		})
+	}
+	return c.service.ConfigureNetwork(ctx, c.peerKernelID, mkringcontrol.ConfigureNetworkPayload{
+		KernelID:  c.kernelID,
+		PodID:     spec.PodID,
+		PodIP:     spec.PodIP,
+		PodCIDR:   spec.PodCIDR,
+		Mode:      spec.Mode,
+		Endpoints: endpoints,
+		Ports:     append([]uint16(nil), spec.Ports...),
+	})
+}
+
+func (c *mkringClient) ConfigureContainerEnv(ctx context.Context, podID, name string, env []EnvVar) error {
+	for _, item := range env {
+		if item.Key == "" {
+			continue
+		}
+		if err := c.service.ConfigureContainerEnv(ctx, c.peerKernelID, mkringcontrol.ConfigureEnvPayload{
+			KernelID: c.kernelID,
+			PodID:    podID,
+			Name:     name,
+			Key:      item.Key,
+			Value:    item.Value,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *mkringClient) CreateContainer(ctx context.Context, spec ContainerSpec) (string, string, error) {
 	result, err := c.service.CreateContainer(ctx, c.peerKernelID, mkringcontrol.CreateContainerPayload{
 		KernelID:    c.kernelID,
@@ -41,6 +78,7 @@ func (c *mkringClient) CreateContainer(ctx context.Context, spec ContainerSpec) 
 		Image:       spec.Image,
 		Command:     append([]string(nil), spec.Command...),
 		Args:        append([]string(nil), spec.Args...),
+		Env:         mkringEnv(spec.Env),
 		Labels:      copyStringMap(spec.Labels),
 		Annotations: copyStringMap(spec.Annotations),
 		LogPath:     spec.LogPath,
@@ -159,6 +197,17 @@ func (c *mkringClient) ExecTTYClose(ctx context.Context, req ExecTTYCloseRequest
 		KernelID:  c.kernelID,
 		SessionID: req.SessionID,
 	})
+}
+
+func mkringEnv(in []EnvVar) []mkringcontrol.EnvVar {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]mkringcontrol.EnvVar, len(in))
+	for i, env := range in {
+		out[i] = mkringcontrol.EnvVar{Key: env.Key, Value: env.Value}
+	}
+	return out
 }
 
 func copyStringMap(in map[string]string) map[string]string {

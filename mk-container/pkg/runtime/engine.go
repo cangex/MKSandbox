@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,9 +32,15 @@ type ContainerSpec struct {
 	Image       string
 	Command     []string
 	Args        []string
+	Env         []EnvVar
 	Labels      map[string]string
 	Annotations map[string]string
 	LogPath     string
+}
+
+type EnvVar struct {
+	Key   string
+	Value string
 }
 
 type ExecTTYSessionRef struct {
@@ -113,6 +120,17 @@ func copySlice(in []string) []string {
 	}
 	out := make([]string, len(in))
 	copy(out, in)
+	return out
+}
+
+func agentEnv(in []EnvVar) []agent.EnvVar {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]agent.EnvVar, len(in))
+	for i, env := range in {
+		out[i] = agent.EnvVar{Key: env.Key, Value: env.Value}
+	}
 	return out
 }
 
@@ -323,34 +341,97 @@ func (e *Engine) startContainerMonitor(containerID string) {
 	go e.monitorContainer(ctx, containerID, mon)
 }
 
+func (e *Engine) networkSpecForPodLocked(pod *model.Pod) agent.NetworkSpec {
+	spec := agent.NetworkSpec{
+		PodID:   pod.ID,
+		PodIP:   pod.IP,
+		PodCIDR: e.podIPAllocator.CIDR(),
+		Mode:    "explicit",
+	}
+	for _, peerPod := range e.pods {
+		if peerPod == nil || peerPod.IP == "" {
+			continue
+		}
+		kernelObj := e.kernels[peerPod.KernelID]
+		if kernelObj == nil {
+			continue
+		}
+		spec.Endpoints = append(spec.Endpoints, agent.NetworkEndpoint{
+			IP:           peerPod.IP,
+			PeerKernelID: kernelObj.PeerKernelID,
+		})
+	}
+	return spec
+}
+
 func (e *Engine) RunPod(ctx context.Context, spec PodSpec) (_ *model.Pod, err error) {
 	podID := util.NewID()
 	kernelID := util.NewID()
+	bootMode := kernelBootModeForPod(spec.Annotations)
+	runStart := time.Now()
 	peerKernelID, err := e.kernelIDAlloc.Allocate()
 	if err != nil {
 		return nil, err
 	}
 
+	startKernelStart := time.Now()
 	instance, err := e.kernelManager.StartKernel(ctx, kernel.StartRequest{
 		KernelID:     kernelID,
 		PeerKernelID: uint16(peerKernelID),
 		PodID:        podID,
 		Namespace:    spec.Namespace,
 		Name:         spec.Name,
-		BootMode:     kernelBootModeForPod(spec.Annotations),
+		BootMode:     bootMode,
 	})
 	if err != nil {
 		e.kernelIDAlloc.Release(peerKernelID)
 		return nil, err
 	}
+	startKernelLatency := time.Since(startKernelStart)
+	waitReadyLatency := time.Duration(0)
+	readySource := "start_kernel"
 
 	if !instance.SkipWaitReady {
+		readySource = "wait_ready"
+		waitReadyStart := time.Now()
 		if err := e.agentFactory.ForKernel(kernelID, instance.Endpoint).WaitReady(ctx); err != nil {
+			waitReadyLatency = time.Since(waitReadyStart)
+			log.Printf("sandbox ready failed pod_id=%s kernel_id=%s peer_kernel_id=%d namespace=%s name=%s boot_mode=%s ready_source=%s total_ms=%d start_kernel_ms=%d wait_ready_ms=%d err=%v",
+				podID,
+				kernelID,
+				instance.PeerKernelID,
+				spec.Namespace,
+				spec.Name,
+				bootMode,
+				readySource,
+				time.Since(runStart).Milliseconds(),
+				startKernelLatency.Milliseconds(),
+				waitReadyLatency.Milliseconds(),
+				err,
+			)
 			_ = e.kernelManager.StopKernel(context.Background(), kernelID)
 			e.kernelIDAlloc.Release(peerKernelID)
 			return nil, fmt.Errorf("wait for guest ready: %w", err)
 		}
+		waitReadyLatency = time.Since(waitReadyStart)
+	} else {
+		// Snapshot restore skips the explicit READY handshake; the host treats
+		// the external restore command's completion as the online ready point.
+		readySource = "snapshot_restore"
 	}
+	totalReadyLatency := time.Since(runStart)
+	log.Printf("sandbox ready pod_id=%s kernel_id=%s peer_kernel_id=%d namespace=%s name=%s boot_mode=%s ready_source=%s total_ms=%d start_kernel_ms=%d wait_ready_ms=%d",
+		podID,
+		kernelID,
+		instance.PeerKernelID,
+		spec.Namespace,
+		spec.Name,
+		bootMode,
+		readySource,
+		totalReadyLatency.Milliseconds(),
+		startKernelLatency.Milliseconds(),
+		waitReadyLatency.Milliseconds(),
+	)
 
 	ip, err := e.podIPAllocator.Allocate()
 	if err != nil {
@@ -506,6 +587,7 @@ func (e *Engine) CreateContainer(ctx context.Context, spec ContainerSpec) (*mode
 		return nil, fmt.Errorf("pod %s already has a container (1 kernel = 1 container)", spec.PodID)
 	}
 	kernelObj := e.kernels[pod.KernelID]
+	netSpec := e.networkSpecForPodLocked(pod)
 	e.mu.RUnlock()
 
 	if kernelObj == nil {
@@ -513,6 +595,12 @@ func (e *Engine) CreateContainer(ctx context.Context, spec ContainerSpec) (*mode
 	}
 
 	client := e.agentFactory.ForKernel(kernelObj.ID, kernelObj.Endpoint)
+	if err := client.ConfigureNetwork(ctx, netSpec); err != nil {
+		return nil, fmt.Errorf("configure pod network: %w", err)
+	}
+	if err := client.ConfigureContainerEnv(ctx, spec.PodID, spec.Name, agentEnv(spec.Env)); err != nil {
+		return nil, fmt.Errorf("configure container env: %w", err)
+	}
 	if kernelBootModeForPod(pod.Annotations) == kernel.BootModeSnapshot {
 		if ensurer, ok := client.(agent.SnapshotPeerReadyEnsurer); ok {
 			if err := ensurer.ForcePeerReady(ctx); err != nil {
@@ -526,6 +614,7 @@ func (e *Engine) CreateContainer(ctx context.Context, spec ContainerSpec) (*mode
 		Image:       spec.Image,
 		Command:     copySlice(spec.Command),
 		Args:        copySlice(spec.Args),
+		Env:         agentEnv(spec.Env),
 		Labels:      copyMap(spec.Labels),
 		Annotations: copyMap(spec.Annotations),
 		LogPath:     spec.LogPath,

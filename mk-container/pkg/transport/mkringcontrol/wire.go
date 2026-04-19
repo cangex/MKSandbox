@@ -18,17 +18,19 @@ const (
 	mkringContainerKindRequest  = 2
 	mkringContainerKindResponse = 3
 
-	mkringContainerOpNone           = 0
-	mkringContainerOpCreate         = 1
-	mkringContainerOpStart          = 2
-	mkringContainerOpStop           = 3
-	mkringContainerOpRemove         = 4
-	mkringContainerOpStatus         = 5
-	mkringContainerOpReadLog        = 6
-	mkringContainerOpExecTTYPrepare = 7
-	mkringContainerOpExecTTYStart   = 8
-	mkringContainerOpExecTTYResize  = 9
-	mkringContainerOpExecTTYClose   = 10
+	mkringContainerOpNone             = 0
+	mkringContainerOpCreate           = 1
+	mkringContainerOpStart            = 2
+	mkringContainerOpStop             = 3
+	mkringContainerOpRemove           = 4
+	mkringContainerOpStatus           = 5
+	mkringContainerOpReadLog          = 6
+	mkringContainerOpExecTTYPrepare   = 7
+	mkringContainerOpExecTTYStart     = 8
+	mkringContainerOpExecTTYResize    = 9
+	mkringContainerOpExecTTYClose     = 10
+	mkringContainerOpConfigureNetwork = 11
+	mkringContainerOpConfigureEnv     = 12
 
 	mkringContainerMaxRuntimeName = 16
 	mkringContainerMaxKernelID    = 64
@@ -42,26 +44,35 @@ const (
 	mkringContainerMaxImageRef    = 256
 	mkringContainerMaxErrorMsg    = 128
 	mkringContainerMaxLogChunk    = 384
+	mkringContainerMaxIP          = 16
+	mkringContainerMaxCIDR        = 24
+	mkringContainerMaxMode        = 16
+	mkringContainerMaxEndpoints   = 16
+	mkringContainerMaxPorts       = 32
+	mkringContainerMaxEnvKey      = 64
+	mkringContainerMaxEnvValue    = 256
 
-	containerHeaderSize                 = 28
-	containerPayloadSize                = 968
-	containerMessageSize                = 996
-	containerWaitReadySize              = 12
-	containerForcePeerReadySize         = 4
-	containerCallSize                   = 2004
-	containerCreateRequestSize          = 968
-	containerControlRequestSize         = 136
-	containerReadLogRequestSize         = 140
-	containerExecTTYPrepareRequestSize  = 392
-	containerExecTTYStartRequestSize    = 128
-	containerExecTTYResizeRequestSize   = 136
-	containerExecTTYCloseRequestSize    = 128
-	containerCreateResponseSize         = 320
-	containerStopResponseSize           = 4
-	containerStatusResponseSize         = 156
-	containerReadLogResponseSize        = 400
-	containerExecTTYPrepareResponseSize = 64
-	containerErrorPayloadSize           = 132
+	containerHeaderSize                  = 28
+	containerPayloadSize                 = 968
+	containerMessageSize                 = 996
+	containerWaitReadySize               = 12
+	containerForcePeerReadySize          = 4
+	containerCallSize                    = 2004
+	containerCreateRequestSize           = 968
+	containerControlRequestSize          = 136
+	containerReadLogRequestSize          = 140
+	containerExecTTYPrepareRequestSize   = 392
+	containerExecTTYStartRequestSize     = 128
+	containerExecTTYResizeRequestSize    = 136
+	containerExecTTYCloseRequestSize     = 128
+	containerConfigureNetworkRequestSize = 576
+	containerConfigureEnvRequestSize     = 512
+	containerCreateResponseSize          = 320
+	containerStopResponseSize            = 4
+	containerStatusResponseSize          = 156
+	containerReadLogResponseSize         = 400
+	containerExecTTYPrepareResponseSize  = 64
+	containerErrorPayloadSize            = 132
 )
 
 type containerHeader struct {
@@ -155,6 +166,32 @@ type containerExecTTYCloseRequest struct {
 	SessionID [mkringContainerMaxContainerID]byte
 }
 
+type containerNetworkEndpoint struct {
+	IP           [mkringContainerMaxIP]byte
+	PeerKernelID uint16
+	Reserved0    uint16
+}
+
+type containerConfigureNetworkRequest struct {
+	KernelID      [mkringContainerMaxKernelID]byte
+	PodID         [mkringContainerMaxPodID]byte
+	PodIP         [mkringContainerMaxIP]byte
+	PodCIDR       [mkringContainerMaxCIDR]byte
+	Mode          [mkringContainerMaxMode]byte
+	EndpointCount uint32
+	PortCount     uint32
+	Endpoints     [mkringContainerMaxEndpoints]containerNetworkEndpoint
+	Ports         [mkringContainerMaxPorts]uint16
+}
+
+type containerConfigureEnvRequest struct {
+	KernelID [mkringContainerMaxKernelID]byte
+	PodID    [mkringContainerMaxPodID]byte
+	Name     [mkringContainerMaxName]byte
+	Key      [mkringContainerMaxEnvKey]byte
+	Value    [mkringContainerMaxEnvValue]byte
+}
+
 type containerCreateResponse struct {
 	ContainerID [mkringContainerMaxContainerID]byte
 	ImageRef    [mkringContainerMaxImageRef]byte
@@ -222,7 +259,7 @@ func effectiveTimeoutMillis(ctx context.Context, timeout time.Duration) (uint32,
 
 func timeoutMillisForRequest(ctx context.Context, req Envelope) (uint32, error) {
 	switch req.Operation {
-	case OpCreateContainer:
+	case OpCreateContainer, OpConfigureNetwork, OpConfigureEnv:
 		return effectiveTimeoutMillis(ctx, 0)
 	case OpStartContainer, OpStopContainer, OpRemoveContainer, OpStatusContainer:
 		var payload ContainerControlPayload
@@ -257,6 +294,76 @@ func encodeRequestMessage(req Envelope) (containerMessage, error) {
 	}
 
 	switch req.Operation {
+	case OpConfigureNetwork:
+		var payload ConfigureNetworkPayload
+		if err := DecodePayload(req, &payload); err != nil {
+			return containerMessage{}, err
+		}
+		if len(payload.Endpoints) > mkringContainerMaxEndpoints {
+			return containerMessage{}, fmt.Errorf("endpoint count %d exceeds max %d", len(payload.Endpoints), mkringContainerMaxEndpoints)
+		}
+		if len(payload.Ports) > mkringContainerMaxPorts {
+			return containerMessage{}, fmt.Errorf("port count %d exceeds max %d", len(payload.Ports), mkringContainerMaxPorts)
+		}
+		netReq := containerConfigureNetworkRequest{
+			EndpointCount: uint32(len(payload.Endpoints)),
+			PortCount:     uint32(len(payload.Ports)),
+		}
+		if err := copyCString(netReq.KernelID[:], payload.KernelID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(netReq.PodID[:], payload.PodID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(netReq.PodIP[:], payload.PodIP); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(netReq.PodCIDR[:], payload.PodCIDR); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(netReq.Mode[:], payload.Mode); err != nil {
+			return containerMessage{}, err
+		}
+		for i, ep := range payload.Endpoints {
+			if err := copyCString(netReq.Endpoints[i].IP[:], ep.IP); err != nil {
+				return containerMessage{}, err
+			}
+			netReq.Endpoints[i].PeerKernelID = ep.PeerKernelID
+		}
+		copy(netReq.Ports[:], payload.Ports)
+		encoded, err := encodeStruct(netReq, containerConfigureNetworkRequestSize)
+		if err != nil {
+			return containerMessage{}, err
+		}
+		copy(msg.Payload[:], encoded)
+		msg.Header.PayloadLen = uint32(containerConfigureNetworkRequestSize)
+	case OpConfigureEnv:
+		var payload ConfigureEnvPayload
+		if err := DecodePayload(req, &payload); err != nil {
+			return containerMessage{}, err
+		}
+		envReq := containerConfigureEnvRequest{}
+		if err := copyCString(envReq.KernelID[:], payload.KernelID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(envReq.PodID[:], payload.PodID); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(envReq.Name[:], payload.Name); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(envReq.Key[:], payload.Key); err != nil {
+			return containerMessage{}, err
+		}
+		if err := copyCString(envReq.Value[:], payload.Value); err != nil {
+			return containerMessage{}, err
+		}
+		encoded, err := encodeStruct(envReq, containerConfigureEnvRequestSize)
+		if err != nil {
+			return containerMessage{}, err
+		}
+		copy(msg.Payload[:], encoded)
+		msg.Header.PayloadLen = uint32(containerConfigureEnvRequestSize)
 	case OpCreateContainer:
 		var payload CreateContainerPayload
 		if err := DecodePayload(req, &payload); err != nil {
@@ -482,7 +589,7 @@ func decodeResponseEnvelope(req Envelope, call containerCall) (Envelope, error) 
 			ContainerID: cString(payload.ContainerID[:]),
 			ImageRef:    cString(payload.ImageRef[:]),
 		})
-	case OpStartContainer, OpRemoveContainer, OpExecTTYStart, OpExecTTYResize, OpExecTTYClose:
+	case OpConfigureNetwork, OpConfigureEnv, OpStartContainer, OpRemoveContainer, OpExecTTYStart, OpExecTTYResize, OpExecTTYClose:
 		if resp.Header.PayloadLen != 0 {
 			return Envelope{}, fmt.Errorf("unexpected empty-response payload length %d", resp.Header.PayloadLen)
 		}
@@ -589,6 +696,10 @@ func operationToUAPI(op Operation) (uint8, error) {
 		return mkringContainerOpExecTTYResize, nil
 	case OpExecTTYClose:
 		return mkringContainerOpExecTTYClose, nil
+	case OpConfigureNetwork:
+		return mkringContainerOpConfigureNetwork, nil
+	case OpConfigureEnv:
+		return mkringContainerOpConfigureEnv, nil
 	default:
 		return 0, fmt.Errorf("unsupported operation %q", op)
 	}

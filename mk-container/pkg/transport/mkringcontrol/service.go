@@ -30,6 +30,38 @@ func (s *Service) ForcePeerReady(ctx context.Context, peerKernelID uint16, kerne
 	return s.transport.ForcePeerReady(ctx, peerKernelID, kernelID)
 }
 
+func (s *Service) ConfigureNetwork(ctx context.Context, peerKernelID uint16, payload ConfigureNetworkPayload) error {
+	req, err := NewRequest(newRequestID(), peerKernelID, payload.KernelID, OpConfigureNetwork, payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := s.transport.RoundTrip(ctx, peerKernelID, req)
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+	}
+	return nil
+}
+
+func (s *Service) ConfigureContainerEnv(ctx context.Context, peerKernelID uint16, payload ConfigureEnvPayload) error {
+	req, err := NewRequest(newRequestID(), peerKernelID, payload.KernelID, OpConfigureEnv, payload)
+	if err != nil {
+		return err
+	}
+
+	resp, err := s.transport.RoundTrip(ctx, peerKernelID, req)
+	if err != nil {
+		return err
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Message)
+	}
+	return nil
+}
+
 func (s *Service) CreateContainer(ctx context.Context, peerKernelID uint16, payload CreateContainerPayload) (CreateContainerResult, error) {
 	req, err := NewRequest(newRequestID(), peerKernelID, payload.KernelID, OpCreateContainer, payload)
 	if err != nil {

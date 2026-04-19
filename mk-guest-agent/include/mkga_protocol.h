@@ -20,6 +20,13 @@
 #define MKGA_MAX_KV_PAIRS 8
 #define MKGA_MAX_KV_KEY_LEN 64
 #define MKGA_MAX_KV_VALUE_LEN 256
+#define MKGA_MAX_IP_LEN 16
+#define MKGA_MAX_CIDR_LEN 24
+#define MKGA_MAX_MODE_LEN 16
+#define MKGA_MAX_ENDPOINTS 16
+#define MKGA_MAX_PORTS 32
+#define MKGA_MAX_ENV_KEY_LEN 64
+#define MKGA_MAX_ENV_VALUE_LEN 256
 
 enum mkga_message_kind {
 	MKGA_MESSAGE_INVALID = 0,
@@ -39,6 +46,8 @@ enum mkga_operation {
 	MKGA_OP_EXEC_TTY_START = 8,
 	MKGA_OP_EXEC_TTY_RESIZE = 9,
 	MKGA_OP_EXEC_TTY_CLOSE = 10,
+	MKGA_OP_CONFIGURE_NETWORK = 11,
+	MKGA_OP_CONFIGURE_ENV = 12,
 };
 
 enum mkga_container_state {
@@ -140,6 +149,32 @@ struct mkga_exec_tty_resize_req {
 	uint32_t height;
 };
 
+struct mkga_network_endpoint {
+	char ip[MKGA_MAX_IP_LEN];
+	uint16_t peer_kernel_id;
+	uint16_t reserved0;
+};
+
+struct mkga_configure_network_req {
+	char kernel_id[MKGA_MAX_KERNEL_ID_LEN];
+	char pod_id[MKGA_MAX_POD_ID_LEN];
+	char pod_ip[MKGA_MAX_IP_LEN];
+	char pod_cidr[MKGA_MAX_CIDR_LEN];
+	char mode[MKGA_MAX_MODE_LEN];
+	uint32_t endpoint_count;
+	uint32_t port_count;
+	struct mkga_network_endpoint endpoints[MKGA_MAX_ENDPOINTS];
+	uint16_t ports[MKGA_MAX_PORTS];
+};
+
+struct mkga_configure_env_req {
+	char kernel_id[MKGA_MAX_KERNEL_ID_LEN];
+	char pod_id[MKGA_MAX_POD_ID_LEN];
+	char name[MKGA_MAX_NAME_LEN];
+	char key[MKGA_MAX_ENV_KEY_LEN];
+	char value[MKGA_MAX_ENV_VALUE_LEN];
+};
+
 union mkga_payload {
 	struct mkga_create_container_req create_container_req;
 	struct mkga_create_container_resp create_container_resp;
@@ -152,6 +187,8 @@ union mkga_payload {
 	struct mkga_exec_tty_prepare_resp exec_tty_prepare_resp;
 	struct mkga_exec_session_control_req exec_session_control_req;
 	struct mkga_exec_tty_resize_req exec_tty_resize_req;
+	struct mkga_configure_network_req configure_network_req;
+	struct mkga_configure_env_req configure_env_req;
 };
 
 struct mkga_envelope {

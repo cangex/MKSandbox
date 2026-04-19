@@ -108,6 +108,12 @@ static bool mkga_message_matches_operation(
 	case MKRING_CONTAINER_OP_EXEC_TTY_CLOSE:
 		return msg->hdr.payload_len ==
 		       sizeof(msg->payload.exec_tty_close_req);
+	case MKRING_CONTAINER_OP_CONFIGURE_NETWORK:
+		return msg->hdr.payload_len ==
+		       sizeof(msg->payload.configure_network_req);
+	case MKRING_CONTAINER_OP_CONFIGURE_ENV:
+		return msg->hdr.payload_len ==
+		       sizeof(msg->payload.configure_env_req);
 	case MKRING_CONTAINER_OP_START:
 	case MKRING_CONTAINER_OP_STOP:
 	case MKRING_CONTAINER_OP_REMOVE:
@@ -161,6 +167,10 @@ static enum mkga_operation mkga_operation_from_mkring(uint8_t operation)
 		return MKGA_OP_EXEC_TTY_RESIZE;
 	case MKRING_CONTAINER_OP_EXEC_TTY_CLOSE:
 		return MKGA_OP_EXEC_TTY_CLOSE;
+	case MKRING_CONTAINER_OP_CONFIGURE_NETWORK:
+		return MKGA_OP_CONFIGURE_NETWORK;
+	case MKRING_CONTAINER_OP_CONFIGURE_ENV:
+		return MKGA_OP_CONFIGURE_ENV;
 	default:
 		return MKGA_OP_INVALID;
 	}
@@ -189,6 +199,10 @@ static uint8_t mkga_operation_to_mkring(enum mkga_operation operation)
 		return MKRING_CONTAINER_OP_EXEC_TTY_RESIZE;
 	case MKGA_OP_EXEC_TTY_CLOSE:
 		return MKRING_CONTAINER_OP_EXEC_TTY_CLOSE;
+	case MKGA_OP_CONFIGURE_NETWORK:
+		return MKRING_CONTAINER_OP_CONFIGURE_NETWORK;
+	case MKGA_OP_CONFIGURE_ENV:
+		return MKRING_CONTAINER_OP_CONFIGURE_ENV;
 	default:
 		return MKRING_CONTAINER_OP_NONE;
 	}
@@ -314,6 +328,91 @@ static int mkga_decode_request_message(
 				msg.payload.create_req.argv[i],
 				sizeof(msg.payload.create_req.argv[i]));
 		}
+		return 0;
+
+	case MKGA_OP_CONFIGURE_NETWORK:
+		mkga_copy_bounded_string(
+			req->kernel_id, sizeof(req->kernel_id),
+			msg.payload.configure_network_req.kernel_id,
+			sizeof(msg.payload.configure_network_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.configure_network_req.kernel_id,
+			sizeof(req->payload.configure_network_req.kernel_id),
+			msg.payload.configure_network_req.kernel_id,
+			sizeof(msg.payload.configure_network_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.configure_network_req.pod_id,
+			sizeof(req->payload.configure_network_req.pod_id),
+			msg.payload.configure_network_req.pod_id,
+			sizeof(msg.payload.configure_network_req.pod_id));
+		mkga_copy_bounded_string(
+			req->payload.configure_network_req.pod_ip,
+			sizeof(req->payload.configure_network_req.pod_ip),
+			msg.payload.configure_network_req.pod_ip,
+			sizeof(msg.payload.configure_network_req.pod_ip));
+		mkga_copy_bounded_string(
+			req->payload.configure_network_req.pod_cidr,
+			sizeof(req->payload.configure_network_req.pod_cidr),
+			msg.payload.configure_network_req.pod_cidr,
+			sizeof(msg.payload.configure_network_req.pod_cidr));
+		mkga_copy_bounded_string(
+			req->payload.configure_network_req.mode,
+			sizeof(req->payload.configure_network_req.mode),
+			msg.payload.configure_network_req.mode,
+			sizeof(msg.payload.configure_network_req.mode));
+		req->payload.configure_network_req.endpoint_count =
+			msg.payload.configure_network_req.endpoint_count;
+		req->payload.configure_network_req.port_count =
+			msg.payload.configure_network_req.port_count;
+		if (req->payload.configure_network_req.endpoint_count > MKGA_MAX_ENDPOINTS ||
+		    req->payload.configure_network_req.port_count > MKGA_MAX_PORTS) {
+			return -EINVAL;
+		}
+		for (size_t i = 0; i < req->payload.configure_network_req.endpoint_count; i++) {
+			mkga_copy_bounded_string(
+				req->payload.configure_network_req.endpoints[i].ip,
+				sizeof(req->payload.configure_network_req.endpoints[i].ip),
+				msg.payload.configure_network_req.endpoints[i].ip,
+				sizeof(msg.payload.configure_network_req.endpoints[i].ip));
+			req->payload.configure_network_req.endpoints[i].peer_kernel_id =
+				msg.payload.configure_network_req.endpoints[i].peer_kernel_id;
+		}
+		for (size_t i = 0; i < req->payload.configure_network_req.port_count; i++) {
+			req->payload.configure_network_req.ports[i] =
+				msg.payload.configure_network_req.ports[i];
+		}
+		return 0;
+
+	case MKGA_OP_CONFIGURE_ENV:
+		mkga_copy_bounded_string(
+			req->kernel_id, sizeof(req->kernel_id),
+			msg.payload.configure_env_req.kernel_id,
+			sizeof(msg.payload.configure_env_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.configure_env_req.kernel_id,
+			sizeof(req->payload.configure_env_req.kernel_id),
+			msg.payload.configure_env_req.kernel_id,
+			sizeof(msg.payload.configure_env_req.kernel_id));
+		mkga_copy_bounded_string(
+			req->payload.configure_env_req.pod_id,
+			sizeof(req->payload.configure_env_req.pod_id),
+			msg.payload.configure_env_req.pod_id,
+			sizeof(msg.payload.configure_env_req.pod_id));
+		mkga_copy_bounded_string(
+			req->payload.configure_env_req.name,
+			sizeof(req->payload.configure_env_req.name),
+			msg.payload.configure_env_req.name,
+			sizeof(msg.payload.configure_env_req.name));
+		mkga_copy_bounded_string(
+			req->payload.configure_env_req.key,
+			sizeof(req->payload.configure_env_req.key),
+			msg.payload.configure_env_req.key,
+			sizeof(msg.payload.configure_env_req.key));
+		mkga_copy_bounded_string(
+			req->payload.configure_env_req.value,
+			sizeof(req->payload.configure_env_req.value),
+			msg.payload.configure_env_req.value,
+			sizeof(msg.payload.configure_env_req.value));
 		return 0;
 
 	case MKGA_OP_READ_LOG:
@@ -509,6 +608,8 @@ static int mkga_encode_response_message(
 		case MKGA_OP_EXEC_TTY_START:
 		case MKGA_OP_EXEC_TTY_RESIZE:
 		case MKGA_OP_EXEC_TTY_CLOSE:
+		case MKGA_OP_CONFIGURE_NETWORK:
+		case MKGA_OP_CONFIGURE_ENV:
 			msg.hdr.payload_len = 0;
 			break;
 

@@ -43,6 +43,14 @@ func (c *countingClient) WaitReady(_ context.Context) error {
 	return nil
 }
 
+func (c *countingClient) ConfigureNetwork(_ context.Context, _ agent.NetworkSpec) error {
+	return nil
+}
+
+func (c *countingClient) ConfigureContainerEnv(_ context.Context, _ string, _ string, _ []agent.EnvVar) error {
+	return nil
+}
+
 func (c *countingClient) CreateContainer(_ context.Context, spec agent.ContainerSpec) (string, string, error) {
 	c.lastCreate = spec
 	return "ctr-test", "", nil

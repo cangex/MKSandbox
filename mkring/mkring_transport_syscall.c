@@ -64,7 +64,7 @@ struct mkct_ctx {
 	struct mkring_info info;
 	bool started;
 	bool stopping;
-	struct mkct_rx_queue queues[MKRING_CHANNEL_STREAM + 1];
+	struct mkct_rx_queue queues[MKRING_CHANNEL_NET + 1];
 	atomic64_t rx_ok;
 	atomic64_t rx_bad;
 	atomic64_t tx_ok;
@@ -77,7 +77,8 @@ static DEFINE_MUTEX(mkct_init_lock);
 static bool mkct_supported_channel(u16 channel)
 {
 	return channel == MKRING_CHANNEL_CONTAINER ||
-	       channel == MKRING_CHANNEL_STREAM;
+	       channel == MKRING_CHANNEL_STREAM ||
+	       channel == MKRING_CHANNEL_NET;
 }
 
 static bool mkct_valid_peer(const struct mkct_ctx *ctx, u16 peer_kernel_id)
@@ -198,6 +199,13 @@ static int mkct_register_demux(struct mkct_ctx *ctx)
 		mkring_demux_unregister_channel(MKRING_CHANNEL_CONTAINER);
 		return ret;
 	}
+	ret = mkring_demux_register_channel(MKRING_CHANNEL_NET,
+					    &mkct_demux_ops, ctx);
+	if (ret) {
+		mkring_demux_unregister_channel(MKRING_CHANNEL_STREAM);
+		mkring_demux_unregister_channel(MKRING_CHANNEL_CONTAINER);
+		return ret;
+	}
 
 	return 0;
 }
@@ -228,6 +236,7 @@ static int mkct_ensure_started(struct mkct_ctx *ctx)
 
 	mkct_queue_init(&ctx->queues[MKRING_CHANNEL_CONTAINER]);
 	mkct_queue_init(&ctx->queues[MKRING_CHANNEL_STREAM]);
+	mkct_queue_init(&ctx->queues[MKRING_CHANNEL_NET]);
 	atomic64_set(&ctx->rx_ok, 0);
 	atomic64_set(&ctx->rx_bad, 0);
 	atomic64_set(&ctx->tx_ok, 0);

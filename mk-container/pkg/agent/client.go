@@ -14,9 +14,29 @@ type ContainerSpec struct {
 	Image       string
 	Command     []string
 	Args        []string
+	Env         []EnvVar
 	Labels      map[string]string
 	Annotations map[string]string
 	LogPath     string
+}
+
+type EnvVar struct {
+	Key   string
+	Value string
+}
+
+type NetworkEndpoint struct {
+	IP           string
+	PeerKernelID uint16
+}
+
+type NetworkSpec struct {
+	PodID     string
+	PodIP     string
+	PodCIDR   string
+	Mode      string
+	Endpoints []NetworkEndpoint
+	Ports     []uint16
 }
 
 type ContainerStatus struct {
@@ -63,6 +83,8 @@ type ExecTTYCloseRequest struct {
 
 type Client interface {
 	WaitReady(ctx context.Context) error
+	ConfigureNetwork(ctx context.Context, spec NetworkSpec) error
+	ConfigureContainerEnv(ctx context.Context, podID, name string, env []EnvVar) error
 	CreateContainer(ctx context.Context, spec ContainerSpec) (string, string, error)
 	StartContainer(ctx context.Context, containerID string) error
 	StopContainer(ctx context.Context, containerID string, timeout time.Duration) (int32, error)

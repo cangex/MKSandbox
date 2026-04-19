@@ -118,6 +118,28 @@ int mkga_agent_handle(struct mkga_agent *agent,
 			}
 			return 0;
 
+	case MKGA_OP_CONFIGURE_NETWORK:
+		mkga_envelope_make_response(req, resp);
+		rc = mkga_runtime_configure_network(
+			agent->runtime,
+			&req->payload.configure_network_req);
+		if (rc != 0) {
+			mkga_envelope_set_error(req, resp, mkga_strerror_name(rc),
+					      "configure_network failed");
+		}
+		return 0;
+
+	case MKGA_OP_CONFIGURE_ENV:
+		mkga_envelope_make_response(req, resp);
+		rc = mkga_runtime_configure_env(
+			agent->runtime,
+			&req->payload.configure_env_req);
+		if (rc != 0) {
+			mkga_envelope_set_error(req, resp, mkga_strerror_name(rc),
+					      "configure_env failed");
+		}
+		return 0;
+
 	case MKGA_OP_EXEC_TTY_PREPARE:
 		mkga_envelope_make_response(req, resp);
 		rc = mkga_runtime_exec_tty_prepare(

@@ -22,6 +22,10 @@ struct mkga_runtime_ops {
 	int (*read_log)(struct mkga_runtime *runtime,
 			const struct mkga_read_log_req *req,
 			struct mkga_read_log_resp *resp);
+	int (*configure_network)(struct mkga_runtime *runtime,
+				 const struct mkga_configure_network_req *req);
+	int (*configure_env)(struct mkga_runtime *runtime,
+			     const struct mkga_configure_env_req *req);
 	int (*exec_tty_prepare)(struct mkga_runtime *runtime,
 				const struct mkga_exec_tty_prepare_req *req,
 				struct mkga_exec_tty_prepare_resp *resp);
@@ -55,6 +59,10 @@ int mkga_runtime_status_container(struct mkga_runtime *runtime,
 int mkga_runtime_read_log(struct mkga_runtime *runtime,
 			  const struct mkga_read_log_req *req,
 			  struct mkga_read_log_resp *resp);
+int mkga_runtime_configure_network(struct mkga_runtime *runtime,
+				   const struct mkga_configure_network_req *req);
+int mkga_runtime_configure_env(struct mkga_runtime *runtime,
+			       const struct mkga_configure_env_req *req);
 int mkga_runtime_exec_tty_prepare(struct mkga_runtime *runtime,
 				  const struct mkga_exec_tty_prepare_req *req,
 				  struct mkga_exec_tty_prepare_resp *resp);

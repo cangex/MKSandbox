@@ -32,8 +32,9 @@
 #define MKGA_CONTAINERD_PULL_TIMEOUT_MS 30000
 #define MKGA_CONTAINERD_READY_POLL_MS 200
 #define MKGA_CONTAINERD_OUTPUT_MAX 4096
-#define MKGA_CONTAINERD_ARGV_MAX 24
+#define MKGA_CONTAINERD_ARGV_MAX 160
 #define MKGA_CONTAINERD_CRI_LOG_BUFFER 4096
+#define MKGA_CONTAINERD_MAX_PENDING_ENV 128
 
 struct mkga_containerd_runtime {
 	char socket_path[MKGA_MAX_LOG_PATH_LEN];
@@ -45,12 +46,22 @@ struct mkga_containerd_runtime {
 	bool no_pivot;
 	bool start_via_run;
 	bool null_io;
+	size_t pending_env_count;
+	struct mkga_configure_env_req pending_env[MKGA_CONTAINERD_MAX_PENDING_ENV];
+};
+
+struct mkga_containerd_env {
+	char key[MKGA_MAX_ENV_KEY_LEN];
+	char value[MKGA_MAX_ENV_VALUE_LEN];
+	char entry[MKGA_MAX_ENV_KEY_LEN + MKGA_MAX_ENV_VALUE_LEN + 2];
 };
 
 struct mkga_containerd_metadata {
 	char image[MKGA_MAX_IMAGE_LEN];
 	uint32_t argv_count;
 	char argv[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN];
+	uint32_t env_count;
+	struct mkga_containerd_env env[MKGA_CONTAINERD_MAX_PENDING_ENV];
 };
 
 struct mkga_containerd_state {
@@ -675,6 +686,44 @@ static int mkga_ctr_fill_base_args(struct mkga_containerd_runtime *impl,
 	return 5;
 }
 
+static int mkga_containerd_set_env_entry(struct mkga_containerd_env *dst,
+					 const char *key,
+					 const char *value)
+{
+	if (!dst || !key || key[0] == '\0') {
+		return -EINVAL;
+	}
+	if (snprintf(dst->entry, sizeof(dst->entry), "%s=%s",
+		     key, value ? value : "") >= (int)sizeof(dst->entry)) {
+		return -ENOSPC;
+	}
+	mkga_copy_string(dst->key, sizeof(dst->key), key);
+	mkga_copy_string(dst->value, sizeof(dst->value), value ? value : "");
+	return 0;
+}
+
+static int mkga_containerd_append_env_argv(char *argv[],
+					   int argc,
+					   int argv_max,
+					   uint32_t env_count,
+					   const struct mkga_containerd_env env[])
+{
+	if (!argv || argc < 0 || argv_max <= 0) {
+		return -EINVAL;
+	}
+	for (uint32_t i = 0; i < env_count; i++) {
+		if (env[i].entry[0] == '\0') {
+			continue;
+		}
+		if (argc >= argv_max - 2) {
+			return -ENOSPC;
+		}
+		argv[argc++] = "--env";
+		argv[argc++] = (char *)env[i].entry;
+	}
+	return argc;
+}
+
 static int mkga_containerd_effective_timeout(struct mkga_containerd_runtime *impl,
 					     int64_t requested_ms,
 					     int fallback_ms)
@@ -817,6 +866,18 @@ static int mkga_containerd_write_metadata(struct mkga_containerd_runtime *impl,
 			return rc;
 		}
 	}
+	if (fprintf(fp, "%u\n", meta->env_count) < 0) {
+		rc = -EIO;
+		(void)fclose(fp);
+		return rc;
+	}
+	for (uint32_t i = 0; i < meta->env_count; i++) {
+		if (fprintf(fp, "%s\n%s\n", meta->env[i].key, meta->env[i].value) < 0) {
+			rc = -EIO;
+			(void)fclose(fp);
+			return rc;
+		}
+	}
 	if (fclose(fp) != 0) {
 		return -errno;
 	}
@@ -883,6 +944,41 @@ static int mkga_containerd_read_metadata(struct mkga_containerd_runtime *impl,
 			*newline = '\0';
 		}
 		mkga_copy_string(meta->argv[i], sizeof(meta->argv[i]), arg_line);
+	}
+	if (fgets(count_line, sizeof(count_line), fp)) {
+		meta->env_count = (uint32_t)strtoul(count_line, NULL, 10);
+		if (meta->env_count > MKGA_CONTAINERD_MAX_PENDING_ENV) {
+			(void)fclose(fp);
+			return -EINVAL;
+		}
+		for (uint32_t i = 0; i < meta->env_count; i++) {
+			char key_line[MKGA_MAX_ENV_KEY_LEN];
+			char value_line[MKGA_MAX_ENV_VALUE_LEN];
+
+			if (!fgets(key_line, sizeof(key_line), fp) ||
+			    !fgets(value_line, sizeof(value_line), fp)) {
+				rc = ferror(fp) ? -EIO : -ENOENT;
+				(void)fclose(fp);
+				return rc;
+			}
+			newline = strchr(key_line, '\n');
+			if (newline) {
+				*newline = '\0';
+			}
+			newline = strchr(value_line, '\n');
+			if (newline) {
+				*newline = '\0';
+			}
+			rc = mkga_containerd_set_env_entry(&meta->env[i],
+							   key_line, value_line);
+			if (rc != 0) {
+				(void)fclose(fp);
+				return rc;
+			}
+		}
+	} else if (ferror(fp)) {
+		(void)fclose(fp);
+		return -EIO;
 	}
 
 	if (fclose(fp) != 0) {
@@ -1181,6 +1277,170 @@ static int mkga_containerd_validate_create_req(const struct mkga_create_containe
 			return -EINVAL;
 		}
 	}
+	return 0;
+}
+
+static int mkga_containerd_configure_env(struct mkga_runtime *runtime,
+					 const struct mkga_configure_env_req *req)
+{
+	struct mkga_containerd_runtime *impl;
+	size_t slot = MKGA_CONTAINERD_MAX_PENDING_ENV;
+
+	if (!runtime || !runtime->impl || !req || req->pod_id[0] == '\0' ||
+	    req->name[0] == '\0' || req->key[0] == '\0') {
+		return -EINVAL;
+	}
+	impl = runtime->impl;
+
+	for (size_t i = 0; i < impl->pending_env_count; i++) {
+		if (strcmp(impl->pending_env[i].pod_id, req->pod_id) == 0 &&
+		    strcmp(impl->pending_env[i].name, req->name) == 0 &&
+		    strcmp(impl->pending_env[i].key, req->key) == 0) {
+			slot = i;
+			break;
+		}
+	}
+	if (slot == MKGA_CONTAINERD_MAX_PENDING_ENV) {
+		if (impl->pending_env_count >= MKGA_CONTAINERD_MAX_PENDING_ENV) {
+			return -ENOSPC;
+		}
+		slot = impl->pending_env_count++;
+	}
+	memset(&impl->pending_env[slot], 0, sizeof(impl->pending_env[slot]));
+	mkga_copy_string(impl->pending_env[slot].kernel_id,
+			 sizeof(impl->pending_env[slot].kernel_id),
+			 req->kernel_id);
+	mkga_copy_string(impl->pending_env[slot].pod_id,
+			 sizeof(impl->pending_env[slot].pod_id),
+			 req->pod_id);
+	mkga_copy_string(impl->pending_env[slot].name,
+			 sizeof(impl->pending_env[slot].name),
+			 req->name);
+	mkga_copy_string(impl->pending_env[slot].key,
+			 sizeof(impl->pending_env[slot].key),
+			 req->key);
+	mkga_copy_string(impl->pending_env[slot].value,
+			 sizeof(impl->pending_env[slot].value),
+			 req->value);
+	return 0;
+}
+
+static void mkga_containerd_exec_network_cmd(struct mkga_containerd_runtime *impl,
+					     char *const argv[])
+{
+	char stdout_buf[MKGA_CONTAINERD_OUTPUT_MAX];
+	char stderr_buf[MKGA_CONTAINERD_OUTPUT_MAX];
+
+	(void)mkga_ctr_exec(impl, argv, impl->default_timeout_ms,
+			    stdout_buf, sizeof(stdout_buf),
+			    stderr_buf, sizeof(stderr_buf));
+}
+
+static int mkga_containerd_configure_network(struct mkga_runtime *runtime,
+					     const struct mkga_configure_network_req *req)
+{
+	struct mkga_containerd_runtime *impl;
+	const char *ip_path;
+	const char *iptables_path;
+	const char *proxy_port;
+	char pod_ip_cidr[64];
+
+	if (!runtime || !runtime->impl || !req || req->pod_ip[0] == '\0') {
+		return -EINVAL;
+	}
+	impl = runtime->impl;
+
+	ip_path = getenv("MK_GUEST_AGENT_IP_PATH");
+	if (!ip_path || ip_path[0] == '\0') {
+		ip_path = "ip";
+	}
+	iptables_path = getenv("MK_GUEST_AGENT_IPTABLES_PATH");
+	if (!iptables_path || iptables_path[0] == '\0') {
+		iptables_path = "iptables";
+	}
+	proxy_port = getenv("MK_GUEST_AGENT_MKNET_PROXY_PORT");
+	if (!proxy_port || proxy_port[0] == '\0') {
+		proxy_port = "15080";
+	}
+
+	if (snprintf(pod_ip_cidr, sizeof(pod_ip_cidr), "%s/32",
+		     req->pod_ip) >= (int)sizeof(pod_ip_cidr)) {
+		return -ENOSPC;
+	}
+
+	{
+		char *argv[] = {(char *)ip_path, "link", "set", "lo", "up", NULL};
+		mkga_containerd_exec_network_cmd(impl, argv);
+	}
+	{
+		char *argv[] = {(char *)ip_path, "addr", "add", pod_ip_cidr,
+				"dev", "lo", NULL};
+		mkga_containerd_exec_network_cmd(impl, argv);
+	}
+	if (strcmp(req->mode, "explicit") == 0) {
+		for (uint32_t i = 0; i < req->endpoint_count && i < MKGA_MAX_ENDPOINTS; i++) {
+			char endpoint_cidr[64];
+
+			if (req->endpoints[i].ip[0] == '\0' ||
+			    strcmp(req->endpoints[i].ip, req->pod_ip) == 0) {
+				continue;
+			}
+			if (snprintf(endpoint_cidr, sizeof(endpoint_cidr), "%s/32",
+				     req->endpoints[i].ip) >= (int)sizeof(endpoint_cidr)) {
+				continue;
+			}
+			{
+				char *argv[] = {(char *)ip_path, "addr", "add",
+						endpoint_cidr, "dev", "lo", NULL};
+				mkga_containerd_exec_network_cmd(impl, argv);
+			}
+		}
+	}
+	if (req->pod_cidr[0] != '\0') {
+		char *argv[] = {(char *)ip_path, "route", "replace",
+				(char *)req->pod_cidr, "dev", "lo", NULL};
+		mkga_containerd_exec_network_cmd(impl, argv);
+	}
+	if (strcmp(req->mode, "redirect") == 0 && req->pod_cidr[0] != '\0') {
+		char *argv[] = {(char *)iptables_path, "-t", "nat", "-A",
+				"OUTPUT", "-d", (char *)req->pod_cidr, "-p",
+				"tcp", "-j", "REDIRECT", "--to-ports",
+				(char *)proxy_port, NULL};
+		mkga_containerd_exec_network_cmd(impl, argv);
+	}
+	return 0;
+}
+
+static int mkga_containerd_apply_pending_env(struct mkga_containerd_runtime *impl,
+					     const struct mkga_create_container_req *req,
+					     struct mkga_containerd_metadata *meta)
+{
+	size_t write_idx = 0;
+
+	if (!impl || !req || !meta) {
+		return -EINVAL;
+	}
+	for (size_t i = 0; i < impl->pending_env_count; i++) {
+		struct mkga_configure_env_req *env = &impl->pending_env[i];
+
+		if (strcmp(env->pod_id, req->pod_id) != 0 ||
+		    strcmp(env->name, req->name) != 0) {
+			if (write_idx != i) {
+				impl->pending_env[write_idx] = impl->pending_env[i];
+			}
+			write_idx++;
+			continue;
+		}
+		if (meta->env_count >= MKGA_CONTAINERD_MAX_PENDING_ENV) {
+			return -ENOSPC;
+		}
+		if (mkga_containerd_set_env_entry(&meta->env[meta->env_count],
+						  env->key, env->value) != 0) {
+			return -ENOSPC;
+		}
+		meta->env_count++;
+	}
+	impl->pending_env_count = write_idx;
 	return 0;
 }
 
@@ -1726,6 +1986,8 @@ static int mkga_containerd_run_logged_foreground(struct mkga_containerd_runtime 
 						 const char *image,
 						 uint32_t argv_count,
 						 char argv_items[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN],
+						 uint32_t env_count,
+						 const struct mkga_containerd_env env[],
 						 const char *log_path)
 {
 	struct mkga_containerd_state state;
@@ -1751,6 +2013,11 @@ static int mkga_containerd_run_logged_foreground(struct mkga_containerd_runtime 
 	if (impl->runc_binary[0] != '\0') {
 		argv[argc++] = "--runc-binary";
 		argv[argc++] = impl->runc_binary;
+	}
+	argc = mkga_containerd_append_env_argv(argv, argc, MKGA_CONTAINERD_ARGV_MAX,
+					       env_count, env);
+	if (argc < 0) {
+		return argc;
 	}
 	argv[argc++] = (char *)image;
 	argv[argc++] = (char *)container_id;
@@ -1784,7 +2051,9 @@ static int mkga_containerd_spawn_log_runner(struct mkga_containerd_runtime *impl
 					    const char *container_id,
 					    const char *image,
 					    uint32_t argv_count,
-					    char argv_items[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN])
+					    char argv_items[MKGA_MAX_ARGV][MKGA_MAX_ARG_LEN],
+					    uint32_t env_count,
+					    const struct mkga_containerd_env env[])
 {
 	char log_path[MKGA_MAX_LOG_PATH_LEN];
 	pid_t child;
@@ -1818,7 +2087,8 @@ static int mkga_containerd_spawn_log_runner(struct mkga_containerd_runtime *impl
 
 		(void)setsid();
 		(void)mkga_containerd_run_logged_foreground(impl, container_id, image,
-							   argv_count, argv_items, log_path);
+							   argv_count, argv_items,
+							   env_count, env, log_path);
 		_exit(0);
 	}
 
@@ -2029,6 +2299,10 @@ static int mkga_containerd_create_container(struct mkga_runtime *runtime,
 	for (uint32_t i = 0; i < req->argv_count; i++) {
 		mkga_copy_string(meta.argv[i], sizeof(meta.argv[i]), req->argv[i]);
 	}
+	rc = mkga_containerd_apply_pending_env(impl, req, &meta);
+	if (rc != 0) {
+		return rc;
+	}
 	mkga_containerd_fill_state(&state, MKGA_CONTAINER_STATE_CREATED, 0, 0, 0, 0, "");
 
 	if (!impl->start_via_run) {
@@ -2039,6 +2313,11 @@ static int mkga_containerd_create_container(struct mkga_runtime *runtime,
 		}
 		argv[argc++] = "containers";
 		argv[argc++] = "create";
+		argc = mkga_containerd_append_env_argv(argv, argc, MKGA_CONTAINERD_ARGV_MAX,
+						       meta.env_count, meta.env);
+		if (argc < 0) {
+			return argc;
+		}
 		argv[argc++] = (char *)req->image;
 		argv[argc++] = container_id;
 		argc = mkga_containerd_append_exec_argv(argv, argc, MKGA_CONTAINERD_ARGV_MAX,
@@ -2115,7 +2394,8 @@ static int mkga_containerd_start_container(struct mkga_runtime *runtime,
 			return rc;
 		}
 		return mkga_containerd_spawn_log_runner(impl, req->container_id, meta.image,
-							meta.argv_count, meta.argv);
+							meta.argv_count, meta.argv,
+							meta.env_count, meta.env);
 	}
 
 	memset(argv, 0, sizeof(argv));
@@ -2707,6 +2987,8 @@ static const struct mkga_runtime_ops mkga_containerd_ops = {
 	.remove_container = mkga_containerd_remove_container,
 	.status_container = mkga_containerd_status_container,
 	.read_log = mkga_containerd_read_log,
+	.configure_network = mkga_containerd_configure_network,
+	.configure_env = mkga_containerd_configure_env,
 	.exec_tty_prepare = mkga_containerd_exec_tty_prepare,
 	.exec_tty_start = mkga_containerd_exec_tty_start,
 	.exec_tty_resize = mkga_containerd_exec_tty_resize,

@@ -18,16 +18,18 @@ const (
 type Operation string
 
 const (
-	OpCreateContainer Operation = "create_container"
-	OpStartContainer  Operation = "start_container"
-	OpStopContainer   Operation = "stop_container"
-	OpRemoveContainer Operation = "remove_container"
-	OpStatusContainer Operation = "status_container"
-	OpReadLog         Operation = "read_log"
-	OpExecTTYPrepare  Operation = "exec_tty_prepare"
-	OpExecTTYStart    Operation = "exec_tty_start"
-	OpExecTTYResize   Operation = "exec_tty_resize"
-	OpExecTTYClose    Operation = "exec_tty_close"
+	OpCreateContainer  Operation = "create_container"
+	OpStartContainer   Operation = "start_container"
+	OpStopContainer    Operation = "stop_container"
+	OpRemoveContainer  Operation = "remove_container"
+	OpStatusContainer  Operation = "status_container"
+	OpReadLog          Operation = "read_log"
+	OpExecTTYPrepare   Operation = "exec_tty_prepare"
+	OpExecTTYStart     Operation = "exec_tty_start"
+	OpExecTTYResize    Operation = "exec_tty_resize"
+	OpExecTTYClose     Operation = "exec_tty_close"
+	OpConfigureNetwork Operation = "configure_network"
+	OpConfigureEnv     Operation = "configure_env"
 )
 
 // Envelope is the logical request/response unit exchanged between the host
@@ -67,9 +69,38 @@ type CreateContainerPayload struct {
 	Image       string            `json:"image"`
 	Command     []string          `json:"command,omitempty"`
 	Args        []string          `json:"args,omitempty"`
+	Env         []EnvVar          `json:"env,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	LogPath     string            `json:"log_path,omitempty"`
+}
+
+type EnvVar struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type NetworkEndpoint struct {
+	IP           string `json:"ip"`
+	PeerKernelID uint16 `json:"peer_kernel_id"`
+}
+
+type ConfigureNetworkPayload struct {
+	KernelID  string            `json:"kernel_id"`
+	PodID     string            `json:"pod_id"`
+	PodIP     string            `json:"pod_ip"`
+	PodCIDR   string            `json:"pod_cidr"`
+	Mode      string            `json:"mode"`
+	Endpoints []NetworkEndpoint `json:"endpoints,omitempty"`
+	Ports     []uint16          `json:"ports,omitempty"`
+}
+
+type ConfigureEnvPayload struct {
+	KernelID string `json:"kernel_id"`
+	PodID    string `json:"pod_id"`
+	Name     string `json:"name"`
+	Key      string `json:"key"`
+	Value    string `json:"value"`
 }
 
 type CreateContainerResult struct {

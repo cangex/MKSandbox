@@ -160,6 +160,22 @@ static int mkga_memory_read_log(struct mkga_runtime *runtime,
 	return 0;
 }
 
+static int mkga_memory_configure_network(struct mkga_runtime *runtime,
+					 const struct mkga_configure_network_req *req)
+{
+	(void)runtime;
+	(void)req;
+	return 0;
+}
+
+static int mkga_memory_configure_env(struct mkga_runtime *runtime,
+				     const struct mkga_configure_env_req *req)
+{
+	(void)runtime;
+	(void)req;
+	return 0;
+}
+
 static int mkga_memory_exec_tty_prepare(struct mkga_runtime *runtime,
 					const struct mkga_exec_tty_prepare_req *req,
 					struct mkga_exec_tty_prepare_resp *resp)
@@ -233,6 +249,8 @@ static const struct mkga_runtime_ops mkga_memory_ops = {
 	.remove_container = mkga_memory_remove_container,
 	.status_container = mkga_memory_status_container,
 	.read_log = mkga_memory_read_log,
+	.configure_network = mkga_memory_configure_network,
+	.configure_env = mkga_memory_configure_env,
 	.exec_tty_prepare = mkga_memory_exec_tty_prepare,
 	.exec_tty_start = mkga_memory_exec_tty_start,
 	.exec_tty_resize = mkga_memory_exec_tty_resize,
@@ -317,6 +335,30 @@ int mkga_runtime_read_log(struct mkga_runtime *runtime,
 		return -EINVAL;
 	}
 	return runtime->ops->read_log(runtime, req, resp);
+}
+
+int mkga_runtime_configure_network(struct mkga_runtime *runtime,
+				   const struct mkga_configure_network_req *req)
+{
+	if (!runtime || !runtime->ops || !runtime->ops->configure_network || !req) {
+		return -EINVAL;
+	}
+	if (!runtime->impl) {
+		return -EINVAL;
+	}
+	return runtime->ops->configure_network(runtime, req);
+}
+
+int mkga_runtime_configure_env(struct mkga_runtime *runtime,
+			       const struct mkga_configure_env_req *req)
+{
+	if (!runtime || !runtime->ops || !runtime->ops->configure_env || !req) {
+		return -EINVAL;
+	}
+	if (!runtime->impl) {
+		return -EINVAL;
+	}
+	return runtime->ops->configure_env(runtime, req);
 }
 
 int mkga_runtime_exec_tty_prepare(struct mkga_runtime *runtime,

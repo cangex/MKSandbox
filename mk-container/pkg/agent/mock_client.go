@@ -23,6 +23,14 @@ func (c *mockClient) WaitReady(_ context.Context) error {
 	return nil
 }
 
+func (c *mockClient) ConfigureNetwork(_ context.Context, _ NetworkSpec) error {
+	return nil
+}
+
+func (c *mockClient) ConfigureContainerEnv(_ context.Context, _, _ string, _ []EnvVar) error {
+	return nil
+}
+
 func (c *mockClient) CreateContainer(_ context.Context, _ ContainerSpec) (string, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
